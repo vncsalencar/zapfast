@@ -1070,20 +1070,31 @@ const THEMES_GUIDE: &str = "https://zapfast.rocks/themes/";
 fn font_picker(ui: &mut egui::Ui, app: &mut App) {
     use crate::settings::FontChoice;
     let palette = app.palette;
-    let selected = app.settings.font;
-    // "Inter" is a name; "System" is a word.
-    let label = |choice: FontChoice| match choice {
+    let selected = app.settings.font.clone();
+    // "Inter" is a name; "System" is a word; a custom font shows its file.
+    let label = |choice: &FontChoice| match choice {
         FontChoice::System => crate::i18n::gettext(app.locale, choice.label()).into_owned(),
         FontChoice::Inter => choice.label().to_owned(),
+        FontChoice::Custom(path) => path.file_name().map_or_else(
+            || choice.label().to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        ),
     };
     let response = egui::ComboBox::from_id_salt("interface_font")
-        .selected_text(label(selected))
+        .selected_text(label(&selected))
         .width(200.0_f32.min(ui.available_width()))
         .show_ui(ui, |ui| {
             for choice in FontChoice::ALL {
-                if theme_option(ui, &palette, &label(choice), selected == choice) {
+                if theme_option(ui, &palette, &label(&choice), selected == choice) {
                     app.actions.push(Action::SetFont(choice));
                 }
+            }
+            if matches!(selected, FontChoice::Custom(_)) {
+                theme_option(ui, &palette, &label(&selected), true);
+            }
+            let choose = crate::i18n::gettext(app.locale, "Choose a file…");
+            if theme_option(ui, &palette, &choose, false) {
+                app.actions.push(Action::PickFont);
             }
         });
     theme::reveal_focus(&response.response);

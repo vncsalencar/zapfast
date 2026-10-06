@@ -48,7 +48,7 @@ impl ThemeChoice {
 }
 
 /// The typeface the interface is drawn with.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FontChoice {
     /// The platform's own interface font.
@@ -56,15 +56,20 @@ pub enum FontChoice {
     System,
     /// The bundled Inter, the same on every machine.
     Inter,
+    /// A TrueType or OpenType file the reader chose. A variable font draws
+    /// every weight; a static one draws them all at its own.
+    Custom(std::path::PathBuf),
 }
 
 impl FontChoice {
+    /// The built-in choices; a custom file is picked separately.
     pub const ALL: [FontChoice; 2] = [Self::System, Self::Inter];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
             Self::System => "System",
             Self::Inter => "Inter",
+            Self::Custom(_) => "Custom",
         }
     }
 }
@@ -886,6 +891,9 @@ mod tests {
         assert_eq!(chosen.font, FontChoice::Inter);
         let saved = serde_json::to_value(&chosen).unwrap();
         assert_eq!(saved["font"], "inter");
+        let custom: Settings =
+            serde_json::from_str(r#"{"font":{"custom":"/fonts/Font.ttf"}}"#).unwrap();
+        assert_eq!(custom.font, FontChoice::Custom("/fonts/Font.ttf".into()));
     }
 
     #[test]

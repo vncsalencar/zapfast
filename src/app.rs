@@ -352,6 +352,9 @@ pub struct App {
     pub account_menu: bool,
     pub palette: Palette,
     pub custom_themes: theme::Catalog,
+    /// The font file dialog while it is open. The font is the process's,
+    /// not an account's, so the dialog does not go through a backend.
+    font_pick: Option<std::sync::mpsc::Receiver<std::path::PathBuf>>,
     applied_dark: Option<bool>,
     /// Reveals a new palette from the middle of the window outwards.
     theme_transition: fastframe_theme::Transition,
@@ -982,6 +985,7 @@ impl App {
             account_menu: false,
             palette,
             custom_themes: theme::Catalog::default(),
+            font_pick: None,
             applied_dark: None,
             theme_transition: fastframe_theme::Transition::default(),
             reveal_theme_changes: !cfg!(test),
@@ -1634,7 +1638,11 @@ impl App {
         // Colour emoji in labels, menus, tooltips and text fields; message
         // bodies paint their own over placeholders, which it leaves alone.
         ctx.add_plugin(crate::emoji::plugin());
-        crate::theme::set_font(ctx, self.settings.font);
+        // A custom font file that went missing draws in the platform's font
+        // and stays chosen, so it returns when the file does.
+        if let Err(error) = crate::theme::set_font(ctx, &self.settings.font) {
+            log::warn!("could not use the chosen font file: {error}");
+        }
         crate::theme::install(ctx);
         // Zoom stays in the settings, so egui must not change it behind the
         // app's back: the shortcuts below go through `Action::ZoomBy`.
@@ -3945,6 +3953,22 @@ impl App {
         );
     }
 
+    /// Applies a font file once its dialog closes with one.
+    fn poll_font_pick(&mut self) {
+        let Some(receiver) = &self.font_pick else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(path) => {
+                self.font_pick = None;
+                self.actions
+                    .push(Action::SetFont(crate::settings::FontChoice::Custom(path)));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.font_pick = None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
     fn poll_custom_themes(&mut self) {
         if self.custom_themes.needs_reload() {
             self.load_custom_themes();
@@ -5356,11 +5380,34 @@ impl App {
                 self.mark_settings_dirty();
                 self.apply_theme(ctx);
             }
-            Action::SetFont(choice) => {
-                self.settings.font = choice;
-                self.mark_settings_dirty();
-                crate::theme::set_font(ctx, choice);
-                ctx.request_repaint();
+            Action::SetFont(choice) => match crate::theme::set_font(ctx, &choice) {
+                Ok(()) => {
+                    self.settings.font = choice;
+                    self.mark_settings_dirty();
+                    ctx.request_repaint();
+                }
+                Err(error) => {
+                    let message = crate::i18n::gettext(self.locale, "Could not use this font");
+                    self.toast_error(format!("{message}: {error}"));
+                }
+            },
+            Action::PickFont => {
+                if self.font_pick.is_none() {
+                    let (picked, receiver) = std::sync::mpsc::channel();
+                    let waker = self.waker.clone();
+                    std::thread::spawn(move || {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Choose a font")
+                            .add_filter("Fonts", &["ttf", "otf", "ttc", "otc"])
+                            .pick_file()
+                        {
+                            let _ = picked.send(path);
+                        }
+                        // Also on cancel, so the closed dialog is noticed.
+                        waker.wake();
+                    });
+                    self.font_pick = Some(receiver);
+                }
             }
             Action::SetInterfaceLanguage(choice) => {
                 self.settings.interface_language = choice;
@@ -5765,6 +5812,7 @@ impl App {
         self.actions.extend(crate::macos::drain(self.window_hidden));
         self.handle_control_commands();
         self.poll_custom_themes();
+        self.poll_font_pick();
         let wallpaper = self.account().settings.wallpaper_image.clone();
         self.wallpaper_image.sync(wallpaper.as_deref(), &self.waker);
         self.handle_notification_opens();
@@ -9450,6 +9498,43 @@ mod tests {
         app.apply(Action::SetFont(FontChoice::System), &ctx);
         assert_eq!(app.settings.font, FontChoice::System);
         assert!(!crate::theme::inter_chosen());
+    }
+
+    /// A font file goes in front of every weight; a file that is not a
+    /// font is refused with a toast and the typeface stays as it was.
+    #[test]
+    fn a_custom_font_file_is_installed_and_a_bad_one_refused() {
+        use crate::settings::FontChoice;
+        let directory = tempfile::tempdir().unwrap();
+        let font = directory.path().join("Font.ttf");
+        std::fs::write(&font, fastframe_fonts::INTER).unwrap();
+        let broken = directory.path().join("Broken.ttf");
+        std::fs::write(&broken, b"not a font").unwrap();
+
+        // The choice is process-wide and other tests set it too, so this
+        // asks the context what it draws with rather than the global.
+        let leads_with_custom = |ctx: &egui::Context| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.label("Drawn in the chosen file");
+            });
+            output.textures_delta.clear();
+            ctx.fonts(|fonts| {
+                fonts.definitions().families[&egui::FontFamily::Proportional]
+                    .first()
+                    .is_some_and(|name| name.starts_with("zapfast-custom-"))
+            })
+        };
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.apply(Action::SetFont(FontChoice::Custom(font.clone())), &ctx);
+        assert_eq!(app.settings.font, FontChoice::Custom(font.clone()));
+        assert!(leads_with_custom(&ctx));
+
+        app.apply(Action::SetFont(FontChoice::Custom(broken)), &ctx);
+        assert_eq!(app.settings.font, FontChoice::Custom(font));
+        assert!(leads_with_custom(&ctx));
+        assert!(!app.toasts.is_empty());
     }
 
     /// A video opens over the window at a size worth the room, goes back to
