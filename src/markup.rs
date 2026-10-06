@@ -89,9 +89,9 @@ pub fn layout(
         let font_id = if span.mono {
             FontId::monospace(size * 0.95)
         } else if span.bold || span.mention {
-            theme::bold(size)
+            theme::chat_font(ui.ctx(), fastframe_fonts::Weight::Bold, size)
         } else {
-            theme::regular(size)
+            theme::chat_font(ui.ctx(), fastframe_fonts::Weight::Regular, size)
         };
         let color = if span.link.is_some() {
             style.link
@@ -129,7 +129,10 @@ pub fn layout(
         job.append(
             " ",
             0.0,
-            TextFormat::simple(theme::regular(size), style.color),
+            TextFormat::simple(
+                theme::chat_font(ui.ctx(), fastframe_fonts::Weight::Regular, size),
+                style.color,
+            ),
         );
     }
     let galley = bidi::layout_job(ui, job);

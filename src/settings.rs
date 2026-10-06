@@ -61,6 +61,35 @@ pub enum FontChoice {
     Custom(std::path::PathBuf),
 }
 
+/// A custom font used before: the file it was chosen by, and its family's
+/// name, so a picker can offer it without reading it again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentFont {
+    pub path: std::path::PathBuf,
+    pub family: String,
+}
+
+/// How many custom fonts the pickers remember.
+const RECENT_FONTS: usize = 5;
+
+impl Settings {
+    /// Puts a custom font first among the recent ones. Returns whether the
+    /// list changed.
+    pub fn remember_font(&mut self, path: &Path, family: &str) -> bool {
+        let font = RecentFont {
+            path: path.to_owned(),
+            family: family.to_owned(),
+        };
+        if self.recent_fonts.first() == Some(&font) {
+            return false;
+        }
+        self.recent_fonts.retain(|recent| recent.path != path);
+        self.recent_fonts.insert(0, font);
+        self.recent_fonts.truncate(RECENT_FONTS);
+        true
+    }
+}
+
 impl FontChoice {
     /// The built-in choices; a custom file is picked separately.
     pub const ALL: [FontChoice; 2] = [Self::System, Self::Inter];
@@ -377,6 +406,12 @@ pub struct Settings {
     pub theme: ThemeChoice,
     /// The interface's typeface.
     pub font: FontChoice,
+    /// The typeface of messages and the message box. `None` follows
+    /// [`Settings::font`].
+    pub chat_font: Option<FontChoice>,
+    /// Custom fonts used before, newest first, so the font pickers keep
+    /// offering them after another font is chosen.
+    pub recent_fonts: Vec<RecentFont>,
     /// Interface language. `None` follows the operating system's locale.
     pub interface_language: Option<crate::i18n::Locale>,
     /// Filename of the selected local JSON palette.
@@ -501,6 +536,8 @@ impl Default for Settings {
             version: SETTINGS_VERSION,
             theme: ThemeChoice::Dark,
             font: FontChoice::System,
+            chat_font: None,
+            recent_fonts: Vec::new(),
             interface_language: None,
             custom_theme: None,
             custom_theme_cache: None,
@@ -894,6 +931,26 @@ mod tests {
         let custom: Settings =
             serde_json::from_str(r#"{"font":{"custom":"/fonts/Font.ttf"}}"#).unwrap();
         assert_eq!(custom.font, FontChoice::Custom("/fonts/Font.ttf".into()));
+        // Messages follow the interface's font until given their own.
+        assert_eq!(older.chat_font, None);
+        let chat: Settings = serde_json::from_str(r#"{"chat_font":"inter"}"#).unwrap();
+        assert_eq!(chat.chat_font, Some(FontChoice::Inter));
+    }
+
+    /// The pickers remember the newest custom fonts, each once.
+    #[test]
+    fn recent_fonts_keep_the_newest_once() {
+        let mut settings = Settings::default();
+        for index in 0..7 {
+            let path = std::path::PathBuf::from(format!("/fonts/{index}.ttf"));
+            assert!(settings.remember_font(&path, "Family"));
+        }
+        assert_eq!(settings.recent_fonts.len(), RECENT_FONTS);
+        assert_eq!(settings.recent_fonts[0].path, Path::new("/fonts/6.ttf"));
+        assert!(!settings.remember_font(Path::new("/fonts/6.ttf"), "Family"));
+        assert!(settings.remember_font(Path::new("/fonts/4.ttf"), "Family"));
+        assert_eq!(settings.recent_fonts[0].path, Path::new("/fonts/4.ttf"));
+        assert_eq!(settings.recent_fonts.len(), RECENT_FONTS);
     }
 
     #[test]

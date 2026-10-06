@@ -152,25 +152,17 @@ impl Family {
             .unwrap_or(&self.faces[0])
     }
 
-    /// Puts the family first in the egui family of each weight, ahead of the
-    /// interface font, which still draws what the family lacks.
-    pub fn add_to(&self, fonts: &mut egui::FontDefinitions) {
-        for weight in Weight::ALL {
-            let face = self.face_for(weight);
-            let name = format!("zapfast-custom-{}", weight.name());
-            let mut data = egui::FontData::from_owned(face.bytes.to_vec());
-            data.index = face.index;
-            if face.variable {
-                data.tweak.coords =
-                    egui::epaint::text::VariationCoords::new([(b"wght", weight.value())]);
-            }
-            fonts.font_data.insert(name.clone(), Arc::new(data));
-            fonts
-                .families
-                .entry(weight.family())
-                .or_default()
-                .insert(0, name);
+    /// The face that draws `weight`, ready for egui: a variable face set to
+    /// the weight on its `wght` axis.
+    pub fn font_data(&self, weight: Weight) -> egui::FontData {
+        let face = self.face_for(weight);
+        let mut data = egui::FontData::from_owned(face.bytes.to_vec());
+        data.index = face.index;
+        if face.variable {
+            data.tweak.coords =
+                egui::epaint::text::VariationCoords::new([(b"wght", weight.value())]);
         }
+        data
     }
 
     /// The weight each interface weight is drawn at, for tests.
@@ -456,9 +448,7 @@ mod tests {
         std::fs::write(&chosen, fastframe_fonts::INTER).unwrap();
         let family = Family::load(&chosen).unwrap();
         assert!(!family.single_weight());
-        let mut fonts = egui::FontDefinitions::default();
-        family.add_to(&mut fonts);
-        let bold = &fonts.font_data[&format!("zapfast-custom-{}", Weight::Bold.name())];
+        let bold = family.font_data(Weight::Bold);
         assert_eq!(
             bold.tweak.coords,
             egui::epaint::text::VariationCoords::new([(b"wght", 700.0)])

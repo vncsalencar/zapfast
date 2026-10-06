@@ -25,6 +25,12 @@ use super::widgets;
 /// Group-message avatar size.
 const SENDER_AVATAR: f32 = 28.0;
 const BODY_SIZE: f32 = 14.5;
+
+/// The font of the message box, which draws in the chat's typeface like
+/// the messages it sends.
+fn body_font(ctx: &egui::Context) -> egui::FontId {
+    theme::chat_font(ctx, fastframe_fonts::Weight::Regular, BODY_SIZE)
+}
 /// Extra space above the first message of a run from one side.
 const RUN_GAP: f32 = 5.0;
 /// Footer label on an outgoing message that failed to send.
@@ -945,7 +951,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
             let mut send_click = false;
             let line_height = ui
                 .painter()
-                .layout_no_wrap("x".to_owned(), theme::regular(BODY_SIZE), palette.text)
+                .layout_no_wrap("x".to_owned(), body_font(ui.ctx()), palette.text)
                 .size()
                 .y;
             // Every control sits in a band as tall as a one-line field at the
@@ -967,7 +973,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                 .data(|data| data.get_temp::<f32>(wrap_id))
                 .map(|wrap| {
                     let format =
-                        egui::TextFormat::simple(theme::regular(BODY_SIZE), palette.text);
+                        egui::TextFormat::simple(body_font(ui.ctx()), palette.text);
                     crate::bidi::layout_editor(ui, &app.composer, &format, wrap, true)
                         .0
                         .size()
@@ -1067,7 +1073,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                 // paint their color bitmaps over the transparent glyphs.
                                 let mut clusters: Vec<(usize, usize, String)> = Vec::new();
                                 let format = egui::TextFormat::simple(
-                                    theme::regular(BODY_SIZE),
+                                    body_font(ui.ctx()),
                                     palette.text,
                                 );
                                 let composer_rtl = crate::bidi::base_rtl(&app.composer);
@@ -1099,9 +1105,9 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                                 .into_owned()
                                         })
                                         .color(palette.dim)
-                                        .font(theme::regular(BODY_SIZE)),
+                                        .font(body_font(ui.ctx())),
                                     )
-                                    .font(theme::regular(BODY_SIZE))
+                                    .font(body_font(ui.ctx()))
                                     .text_color(palette.text)
                                     .desired_rows(1)
                                     .desired_width(f32::INFINITY)
@@ -1393,7 +1399,7 @@ pub(crate) fn scroll_metrics_id(chat: &ChatId) -> egui::Id {
 /// How far below the top of a composer text row the middle of its ink sits,
 /// at this scale: halfway from a capital's top to a descender's bottom.
 fn ink_middle(ui: &egui::Ui, line_height: f32) -> f32 {
-    let format = egui::TextFormat::simple(theme::regular(BODY_SIZE), Color32::WHITE);
+    let format = egui::TextFormat::simple(body_font(ui.ctx()), Color32::WHITE);
     let (galley, _) = crate::bidi::layout_editor(ui, "Hy", &format, f32::INFINITY, true);
     galley
         .rows
@@ -6927,7 +6933,7 @@ fn recording_strip(app: &mut App, ui: &mut egui::Ui) {
     // height while recording.
     let line_height = ui
         .painter()
-        .layout_no_wrap("x".to_owned(), theme::regular(BODY_SIZE), palette.text)
+        .layout_no_wrap("x".to_owned(), body_font(ui.ctx()), palette.text)
         .size()
         .y;
     let row_height = (line_height + COMPOSER_PADDING)

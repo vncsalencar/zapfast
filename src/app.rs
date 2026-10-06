@@ -354,10 +354,14 @@ pub struct App {
     pub custom_themes: theme::Catalog,
     /// The font file dialog while it is open. The font is the process's,
     /// not an account's, so the dialog does not go through a backend.
-    font_pick: Option<std::sync::mpsc::Receiver<std::path::PathBuf>>,
-    /// A custom font family being read, and whether the reader chose it
-    /// just now (saved, and refused with a toast) rather than at startup.
-    font_load: Option<(theme::FontLoad, bool)>,
+    font_pick: Option<(
+        theme::FontSlot,
+        std::sync::mpsc::Receiver<std::path::PathBuf>,
+    )>,
+    /// Custom font families being read, at most one per slot, and whether
+    /// the reader chose each just now (saved, and refused with a toast)
+    /// rather than at startup.
+    font_loads: Vec<(theme::FontLoad, bool)>,
     applied_dark: Option<bool>,
     /// Reveals a new palette from the middle of the window outwards.
     theme_transition: fastframe_theme::Transition,
@@ -989,7 +993,7 @@ impl App {
             palette,
             custom_themes: theme::Catalog::default(),
             font_pick: None,
-            font_load: None,
+            font_loads: Vec::new(),
             applied_dark: None,
             theme_transition: fastframe_theme::Transition::default(),
             reveal_theme_changes: !cfg!(test),
@@ -1644,9 +1648,14 @@ impl App {
         ctx.add_plugin(crate::emoji::plugin());
         // A custom family is read on a thread and replaces the platform's
         // font once it arrives; a new window keeps one already read.
-        if !crate::theme::font_installed(&self.settings.font) {
-            crate::theme::set_font(ctx, &self.settings.font, None);
-            self.start_font_load(self.settings.font.clone(), false);
+        for slot in [theme::FontSlot::Interface, theme::FontSlot::Chat] {
+            let saved = self.saved_font(slot);
+            if !theme::font_installed(slot, saved.as_ref()) {
+                theme::set_font(ctx, slot, saved.as_ref(), None);
+                if let Some(choice) = saved {
+                    self.start_font_load(slot, choice, false);
+                }
+            }
         }
         crate::theme::install(ctx);
         // Zoom stays in the settings, so egui must not change it behind the
@@ -3958,57 +3967,105 @@ impl App {
         );
     }
 
-    /// Starts reading a custom font family off the interface thread; built-in
-    /// choices start nothing. A newer choice replaces one still being read.
-    fn start_font_load(&mut self, choice: crate::settings::FontChoice, chosen_now: bool) {
-        let waker = self.waker.clone();
-        if let Some(load) = theme::FontLoad::start(choice, move || waker.wake()) {
-            self.font_load = Some((load, chosen_now));
+    /// The saved font of `slot`; the chat's `None` follows the interface.
+    fn saved_font(&self, slot: theme::FontSlot) -> Option<crate::settings::FontChoice> {
+        match slot {
+            theme::FontSlot::Interface => Some(self.settings.font.clone()),
+            theme::FontSlot::Chat => self.settings.chat_font.clone(),
         }
     }
 
-    /// Installs a custom family once it has been read. One chosen just now
-    /// is saved, or refused with a toast; the saved one failing at startup
-    /// draws in the platform's font and stays chosen, so it returns when
-    /// its file does.
-    fn poll_font_load(&mut self, ctx: &egui::Context) {
-        let Some((load, chosen_now)) = &self.font_load else {
+    fn save_font(&mut self, slot: theme::FontSlot, font: Option<crate::settings::FontChoice>) {
+        match (slot, font) {
+            (theme::FontSlot::Interface, Some(font)) => self.settings.font = font,
+            (theme::FontSlot::Interface, None) => return,
+            (theme::FontSlot::Chat, font) => self.settings.chat_font = font,
+        }
+        self.mark_settings_dirty();
+    }
+
+    /// Chooses `slot`'s font: a built-in one at once, a custom one once its
+    /// family has been read and installed.
+    fn choose_font(
+        &mut self,
+        ctx: &egui::Context,
+        slot: theme::FontSlot,
+        font: Option<crate::settings::FontChoice>,
+    ) {
+        if let Some(choice @ crate::settings::FontChoice::Custom(_)) = &font {
+            self.start_font_load(slot, choice.clone(), true);
             return;
-        };
-        let Some(result) = load.poll() else {
-            return;
-        };
-        let chosen_now = *chosen_now;
-        let Some((load, _)) = self.font_load.take() else {
-            return;
-        };
-        match result {
-            Ok(family) => {
-                theme::set_font(ctx, &load.choice, Some(family));
-                if chosen_now {
-                    self.settings.font = load.choice;
-                    self.mark_settings_dirty();
+        }
+        // Overrides a custom family still being read for this slot.
+        self.font_loads.retain(|(load, _)| load.slot != slot);
+        theme::set_font(ctx, slot, font.as_ref(), None);
+        self.save_font(slot, font);
+        ctx.request_repaint();
+    }
+
+    /// Starts reading a custom font family off the interface thread; built-in
+    /// choices start nothing. A newer choice replaces one still being read
+    /// for the same slot.
+    fn start_font_load(
+        &mut self,
+        slot: theme::FontSlot,
+        choice: crate::settings::FontChoice,
+        chosen_now: bool,
+    ) {
+        let waker = self.waker.clone();
+        if let Some(load) = theme::FontLoad::start(slot, choice, move || waker.wake()) {
+            self.font_loads.retain(|(load, _)| load.slot != slot);
+            self.font_loads.push((load, chosen_now));
+        }
+    }
+
+    /// Installs custom families once they have been read, and remembers
+    /// them for the pickers. One chosen just now is saved, or refused with a
+    /// toast; a saved one failing at startup draws in the platform's font and
+    /// stays chosen, so it returns when its file does.
+    fn poll_font_loads(&mut self, ctx: &egui::Context) {
+        let mut index = 0;
+        while index < self.font_loads.len() {
+            let Some(result) = self.font_loads[index].0.poll() else {
+                index += 1;
+                continue;
+            };
+            let (load, chosen_now) = self.font_loads.remove(index);
+            match result {
+                Ok(family) => {
+                    if let crate::settings::FontChoice::Custom(path) = &load.choice
+                        && self.settings.remember_font(path, family.family())
+                    {
+                        self.mark_settings_dirty();
+                    }
+                    theme::set_font(ctx, load.slot, Some(&load.choice), Some(family));
+                    if chosen_now {
+                        self.save_font(load.slot, Some(load.choice));
+                    }
+                    ctx.request_repaint();
                 }
-                ctx.request_repaint();
+                Err(error) if chosen_now => {
+                    let message = crate::i18n::gettext(self.locale, "Could not use this font");
+                    self.toast_error(format!("{message}: {error}"));
+                }
+                Err(error) => log::warn!("could not use the chosen font file: {error}"),
             }
-            Err(error) if chosen_now => {
-                let message = crate::i18n::gettext(self.locale, "Could not use this font");
-                self.toast_error(format!("{message}: {error}"));
-            }
-            Err(error) => log::warn!("could not use the chosen font file: {error}"),
         }
     }
 
     /// Applies a font file once its dialog closes with one.
     fn poll_font_pick(&mut self) {
-        let Some(receiver) = &self.font_pick else {
+        let Some((slot, receiver)) = &self.font_pick else {
             return;
         };
         match receiver.try_recv() {
             Ok(path) => {
+                let choice = crate::settings::FontChoice::Custom(path);
+                self.actions.push(match slot {
+                    theme::FontSlot::Interface => Action::SetFont(choice),
+                    theme::FontSlot::Chat => Action::SetChatFont(Some(choice)),
+                });
                 self.font_pick = None;
-                self.actions
-                    .push(Action::SetFont(crate::settings::FontChoice::Custom(path)));
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => self.font_pick = None,
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -5427,19 +5484,10 @@ impl App {
                 self.apply_theme(ctx);
             }
             Action::SetFont(choice) => {
-                if matches!(choice, crate::settings::FontChoice::Custom(_)) {
-                    // Saved once its family has been read and installed.
-                    self.start_font_load(choice, true);
-                } else {
-                    // Overrides a custom family still being read.
-                    self.font_load = None;
-                    crate::theme::set_font(ctx, &choice, None);
-                    self.settings.font = choice;
-                    self.mark_settings_dirty();
-                    ctx.request_repaint();
-                }
+                self.choose_font(ctx, theme::FontSlot::Interface, Some(choice));
             }
-            Action::PickFont => {
+            Action::SetChatFont(choice) => self.choose_font(ctx, theme::FontSlot::Chat, choice),
+            Action::PickFont(slot) => {
                 if self.font_pick.is_none() {
                     let (picked, receiver) = std::sync::mpsc::channel();
                     let waker = self.waker.clone();
@@ -5454,7 +5502,7 @@ impl App {
                         // Also on cancel, so the closed dialog is noticed.
                         waker.wake();
                     });
-                    self.font_pick = Some(receiver);
+                    self.font_pick = Some((slot, receiver));
                 }
             }
             Action::SetInterfaceLanguage(choice) => {
@@ -5861,7 +5909,7 @@ impl App {
         self.handle_control_commands();
         self.poll_custom_themes();
         self.poll_font_pick();
-        self.poll_font_load(ctx);
+        self.poll_font_loads(ctx);
         let wallpaper = self.account().settings.wallpaper_image.clone();
         self.wallpaper_image.sync(wallpaper.as_deref(), &self.waker);
         self.handle_notification_opens();
@@ -9564,21 +9612,25 @@ mod tests {
 
         // The choice is process-wide and other tests set it too, so this
         // asks the context what it draws with rather than the global.
-        let leads_with_custom = |ctx: &egui::Context| {
+        let first_font = |ctx: &egui::Context, family: egui::FontFamily| {
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
                 ui.label("Drawn in the chosen file");
             });
             output.textures_delta.clear();
             ctx.fonts(|fonts| {
-                fonts.definitions().families[&egui::FontFamily::Proportional]
+                fonts.definitions().families[&family]
                     .first()
-                    .is_some_and(|name| name.starts_with("zapfast-custom-"))
+                    .cloned()
+                    .unwrap_or_default()
             })
+        };
+        let leads_with_custom = |ctx: &egui::Context| {
+            first_font(ctx, egui::FontFamily::Proportional).starts_with("zapfast-custom-")
         };
         let finish_loading = |app: &mut App, ctx: &egui::Context| {
             for _ in 0..500 {
-                app.poll_font_load(ctx);
-                if app.font_load.is_none() {
+                app.poll_font_loads(ctx);
+                if app.font_loads.is_empty() {
                     return;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -9601,10 +9653,33 @@ mod tests {
         assert!(leads_with_custom(&ctx));
         assert!(!app.toasts.is_empty());
 
-        app.apply(Action::SetFont(FontChoice::Custom(font)), &ctx);
+        app.apply(Action::SetFont(FontChoice::Custom(font.clone())), &ctx);
         app.apply(Action::SetFont(FontChoice::Inter), &ctx);
-        assert!(app.font_load.is_none());
+        assert!(app.font_loads.is_empty());
         assert_eq!(app.settings.font, FontChoice::Inter);
+        // The pickers still offer the font after another was chosen.
+        assert_eq!(app.settings.recent_fonts.len(), 1);
+        assert_eq!(app.settings.recent_fonts[0].path, font);
+
+        // Messages take their own font, and the interface keeps its own.
+        app.apply(
+            Action::SetChatFont(Some(FontChoice::Custom(font.clone()))),
+            &ctx,
+        );
+        finish_loading(&mut app, &ctx);
+        assert_eq!(app.settings.chat_font, Some(FontChoice::Custom(font)));
+        let chat = egui::FontFamily::Name(
+            format!("zapfast-chat-{}", fastframe_fonts::Weight::Regular.name()).into(),
+        );
+        assert!(first_font(&ctx, chat.clone()).starts_with("zapfast-chat-custom-"));
+        assert!(!leads_with_custom(&ctx));
+        // Following the interface again draws messages in its font.
+        app.apply(Action::SetChatFont(None), &ctx);
+        assert_eq!(app.settings.chat_font, None);
+        assert_eq!(
+            first_font(&ctx, chat),
+            first_font(&ctx, egui::FontFamily::Proportional)
+        );
     }
 
     /// A video opens over the window at a size worth the room, goes back to
