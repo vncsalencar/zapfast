@@ -36,7 +36,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     380.0
                 }
                 Dialog::ConfirmClearChat(_) => 380.0,
-                Dialog::ConfirmDeleteMessage { .. } => 380.0,
+                Dialog::ConfirmDeleteMessage { .. } | Dialog::ConfirmDeleteSelected { .. } => 380.0,
                 Dialog::StickerPack => 420.0,
                 Dialog::StickerMaker => 400.0,
                 Dialog::Forward { .. } => 420.0,
@@ -78,6 +78,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     message,
                     for_everyone,
                 } => confirm_delete_message(app, ui, &chat, &message, for_everyone),
+                Dialog::ConfirmDeleteSelected { chat, messages } => {
+                    confirm_delete_selected(app, ui, &chat, &messages)
+                }
                 Dialog::Forward { chat, messages } => forward(app, ui, &chat, &messages),
                 Dialog::JoinGroup => join_group(app, ui),
                 Dialog::ConfirmStartOver => confirm_start_over(app, ui),
@@ -1139,6 +1142,49 @@ fn confirm_delete_message(
                 };
                 app.actions.push(action);
                 app.actions.push(Action::CloseDialog);
+            }
+            if theme::pill_button(ui, &palette, "Cancel", false).clicked() {
+                app.actions.push(Action::CloseDialog);
+            }
+        });
+    });
+}
+
+/// What confirming the deletion of the selection does: each message is
+/// deleted for me as Delete for me does one, and the selection and the
+/// dialog close.
+pub(crate) fn delete_selected(chat: &str, messages: &[String]) -> Vec<Action> {
+    messages
+        .iter()
+        .map(|id| Action::DeleteForMe {
+            chat: chat.to_owned(),
+            id: id.clone(),
+        })
+        .chain([Action::CancelSelection, Action::CloseDialog])
+        .collect()
+}
+
+/// Confirms deleting the selected messages for me. Enter is not bound, as
+/// for one message.
+fn confirm_delete_selected(app: &mut App, ui: &mut egui::Ui, chat: &str, messages: &[String]) {
+    let palette = app.palette;
+    let heading = if messages.len() == 1 {
+        crate::i18n::gettext(app.locale, "Delete 1 message for me?").into_owned()
+    } else {
+        crate::i18n::gettext(app.locale, "Delete {count} messages for me?")
+            .replace("{count}", &messages.len().to_string())
+    };
+    let body = crate::i18n::gettext(
+        app.locale,
+        "This removes them from your phone and linked devices. Other people keep their copies. Connect to WhatsApp to delete them. This cannot be undone.",
+    );
+    title(ui, app, &heading);
+    theme::paragraph(ui, body.into_owned(), theme::regular(13.5), palette.text);
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if danger_button(ui, app, "Delete") {
+                app.actions.extend(delete_selected(chat, messages));
             }
             if theme::pill_button(ui, &palette, "Cancel", false).clicked() {
                 app.actions.push(Action::CloseDialog);

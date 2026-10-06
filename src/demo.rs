@@ -6156,8 +6156,78 @@ mod tests {
         }
     }
 
+    /// Holding Ctrl or Shift, a click on a message's middle, over its text or
+    /// its document card, picks the message instead of what is inside. A
+    /// Shift-click starts a selection too, so a second one takes the range.
     #[test]
-    fn ineligible_messages_have_neither_selection_boxes_nor_menu_actions() {
+    fn a_modified_click_anywhere_on_a_message_selects_it() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        for _ in 0..3 {
+            render(&mut app, &ctx);
+        }
+        let chat = sample_ids()[0].to_owned();
+        let click = |app: &mut App, message: &str, modifiers: egui::Modifiers| {
+            let id = crate::ui::conversation::bubble_id(&chat, message);
+            let pos = ctx
+                .data(|data| data.get_temp::<egui::Rect>(id.with("rect")))
+                .unwrap_or_else(|| panic!("{message} is on screen"))
+                .center();
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers,
+            };
+            // The key goes down before the click, as a hand presses it.
+            frame_with(
+                app,
+                &ctx,
+                vec![
+                    egui::Event::ModifiersChanged(modifiers),
+                    egui::Event::PointerMoved(pos),
+                ],
+            );
+            frame_with(app, &ctx, vec![button(true)]);
+            frame_with(app, &ctx, vec![button(false)]);
+            frame_with(
+                app,
+                &ctx,
+                vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)],
+            );
+        };
+        let selected = |app: &App| app.selection.as_ref().map(|(_, ids)| ids.clone());
+        click(&mut app, "ada-reply", egui::Modifiers::COMMAND);
+        assert_eq!(
+            selected(&app),
+            Some(vec!["ada-reply".to_owned()]),
+            "Ctrl-click on the text"
+        );
+        app.selection = None;
+        click(&mut app, "ada-doc", egui::Modifiers::SHIFT);
+        assert_eq!(
+            selected(&app),
+            Some(vec!["ada-doc".to_owned()]),
+            "Shift-click on the document card starts a selection"
+        );
+        click(&mut app, "ada-reply", egui::Modifiers::SHIFT);
+        assert_eq!(
+            selected(&app),
+            Some(
+                ["ada-doc", "ada-voice", "you-voice", "ada-reply"]
+                    .map(str::to_owned)
+                    .to_vec()
+            ),
+            "a second Shift-click takes the range"
+        );
+        assert!(app.dialog.is_none(), "the document did not open");
+    }
+
+    /// As in WhatsApp, every message can be selected, with its box and the
+    /// Select action; Forward is offered only for what can be forwarded.
+    #[test]
+    fn every_message_can_be_selected_and_only_some_forwarded() {
         for content in [
             Content::Revoked,
             Content::PhoneOnly {
@@ -6179,7 +6249,7 @@ mod tests {
             },
             Content::text("A selectable message"),
         ] {
-            let selectable = matches!(content, Content::Text { .. });
+            let forwardable = crate::app::can_forward(&content);
             let mut app = app();
             let chat = sample_ids()[0].to_owned();
             let conversation = app.conversations.get_mut(&chat).unwrap();
@@ -6193,33 +6263,62 @@ mod tests {
                 render(&mut app, &ctx);
             }
             let check = crate::ui::conversation::bubble_id(&chat, "ada-reply").with("check");
-            assert_eq!(
-                ctx.data(|data| data.get_temp::<egui::Rect>(check).is_some()),
-                selectable
-            );
+            assert!(ctx.data(|data| data.get_temp::<egui::Rect>(check).is_some()));
             let pick = crate::ui::conversation::bubble_id(&chat, "ada-reply").with("pick");
             assert_eq!(
                 ctx.read_response(pick).unwrap().sense,
-                if selectable {
-                    egui::Sense::click_and_drag()
-                } else {
-                    egui::Sense::hover()
-                },
-                "only a visible checkbox can receive focus or start a sweep"
+                egui::Sense::click_and_drag()
             );
+            // Selected, Forward waits for what cannot go; Delete for me does
+            // not.
+            app.selection = Some((chat.clone(), vec!["ada-reply".into()]));
+            render(&mut app, &ctx);
+            let click_label = |app: &mut App, wanted: &str| {
+                let nodes = accessible_nodes(app, &ctx, Vec::new());
+                let (_, _, pos) = nodes
+                    .iter()
+                    .find(|(label, _, _)| label == wanted)
+                    .unwrap_or_else(|| panic!("{wanted} is offered"))
+                    .clone();
+                let button = |pressed| egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                frame_with(
+                    app,
+                    &ctx,
+                    vec![egui::Event::PointerMoved(pos), button(true)],
+                );
+                frame_with(app, &ctx, vec![button(false)]);
+                frame_with(app, &ctx, Vec::new());
+            };
+            click_label(&mut app, "Forward…");
+            assert_eq!(
+                matches!(app.dialog, Some(Dialog::Forward { .. })),
+                forwardable,
+                "Forward opens only for what can be forwarded"
+            );
+            app.dialog = None;
+            click_label(&mut app, "Delete for me…");
+            assert!(
+                matches!(app.dialog, Some(Dialog::ConfirmDeleteSelected { .. })),
+                "Delete for me asks first"
+            );
+            app.dialog = None;
             app.selection = None;
             render(&mut app, &ctx);
             app.open_message_menu = Some("ada-reply".into());
             render(&mut app, &ctx);
             let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
             assert!(nodes.iter().any(|(label, _, _)| label == "Copy message ID"));
-            for action in ["Select", "Forward"] {
-                assert_eq!(
-                    nodes.iter().any(|(label, _, _)| label == action),
-                    selectable,
-                    "only eligible messages offer {action}"
-                );
-            }
+            assert!(nodes.iter().any(|(label, _, _)| label == "Select"));
+            assert_eq!(
+                nodes.iter().any(|(label, _, _)| label == "Forward"),
+                forwardable,
+                "only what can be forwarded offers Forward"
+            );
         }
     }
 

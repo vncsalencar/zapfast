@@ -303,8 +303,10 @@ pub(crate) struct Sweep {
     base: Vec<String>,
 }
 
-/// Whether a message can join a selection, matching `Worker::forward_job`.
-pub(crate) fn can_select(content: &Content) -> bool {
+/// Whether a message can be forwarded, matching `Worker::forward_job`. Any
+/// message can be selected, as in WhatsApp; Forward waits until every
+/// selected one can go.
+pub(crate) fn can_forward(content: &Content) -> bool {
     !matches!(
         content,
         Content::Revoked
@@ -316,8 +318,7 @@ pub(crate) fn can_select(content: &Content) -> bool {
 }
 
 /// Adds the messages from `anchor` to `to` to a selection, in either
-/// direction, keeping the chat's order and skipping content that cannot
-/// be forwarded.
+/// direction, keeping the chat's order.
 fn add_range(messages: &[Message], ids: &mut Vec<String>, anchor: &str, to: &str) {
     let position = |id: &str| messages.iter().position(|message| message.id == id);
     let (Some(from), Some(to)) = (position(anchor), position(to)) else {
@@ -325,7 +326,7 @@ fn add_range(messages: &[Message], ids: &mut Vec<String>, anchor: &str, to: &str
     };
     let (from, to) = (from.min(to), from.max(to));
     for message in &messages[from..=to] {
-        if can_select(&message.content) && !ids.contains(&message.id) {
+        if !ids.contains(&message.id) {
             ids.push(message.id.clone());
         }
     }
@@ -1779,8 +1780,11 @@ impl App {
             ) if chat == id
         ) || matches!(
             &self.dialog,
-            Some(Dialog::Forward { chat, .. } | Dialog::ConfirmDeleteMessage { chat, .. })
-                if chat == id
+            Some(
+                Dialog::Forward { chat, .. }
+                    | Dialog::ConfirmDeleteMessage { chat, .. }
+                    | Dialog::ConfirmDeleteSelected { chat, .. }
+            ) if chat == id
         ) {
             self.dialog = None;
             self.poll_creating = false;
@@ -2976,10 +2980,12 @@ impl App {
             return;
         };
         let conversation = self.conversations.get(chat.as_str());
+        // Any message still in the chat stays selected, even one deleted for
+        // everyone meanwhile; Forward waits until it is left out.
         let selectable = |id: &str| {
             conversation
                 .and_then(|conversation| conversation.message(id))
-                .is_some_and(|message| can_select(&message.content))
+                .is_some()
         };
         let ids: Vec<String> = ids.into_iter().filter(|id| selectable(id)).collect();
         let anchor_gone = self
@@ -4630,7 +4636,7 @@ impl App {
                         .conversations
                         .get(&chat)
                         .and_then(|conversation| conversation.message(&id))
-                        .is_some_and(|message| can_select(&message.content))
+                        .is_some()
                 {
                     self.selection = Some((chat, vec![id.clone()]));
                     self.selection_anchor = Some(id);
@@ -4709,7 +4715,7 @@ impl App {
                         .conversations
                         .get(chat.as_str())
                         .and_then(|conversation| conversation.message(&id))
-                        .is_some_and(|message| can_select(&message.content));
+                        .is_some();
                     if !selectable {
                         return;
                     }
@@ -8740,7 +8746,7 @@ mod tests {
         assert_eq!(forwarded, ["first", "third"]);
         assert!(app.selection.is_none());
         // Shift-click selects everything between the last click and this one,
-        // skipping what cannot be forwarded.
+        // a deleted message too, as in WhatsApp.
         let mut deleted = message(chat, "gone", 4);
         deleted.content = Content::Revoked;
         app.conversations
@@ -8751,7 +8757,12 @@ mod tests {
         app.apply(Action::SelectRange("fifth".into()), &ctx);
         assert_eq!(
             app.selection.as_ref().map(|(_, ids)| ids.clone()),
-            Some(vec!["second".into(), "third".into(), "fifth".into()])
+            Some(vec![
+                "second".into(),
+                "third".into(),
+                "gone".into(),
+                "fifth".into()
+            ])
         );
         app.apply(Action::CancelSelection, &ctx);
         // Unselecting the last message keeps selecting, as WhatsApp Web
@@ -8764,15 +8775,21 @@ mod tests {
         assert_eq!(app.selection, Some((chat.into(), Vec::new())));
         app.apply(Action::ToggleSelected("fifth".into()), &ctx);
         assert_eq!(app.selection, Some((chat.into(), vec!["fifth".into()])));
-        // Choosing it again keeps what is ticked, and a deleted message
-        // cannot be ticked.
+        // Choosing it again keeps what is ticked, and a deleted message can
+        // be ticked, in the chat's order.
         app.apply(Action::StartSelection, &ctx);
         app.apply(Action::ToggleSelected("gone".into()), &ctx);
-        assert_eq!(app.selection, Some((chat.into(), vec!["fifth".into()])));
+        assert_eq!(
+            app.selection,
+            Some((chat.into(), vec!["gone".into(), "fifth".into()]))
+        );
     }
 
+    /// A selected message deleted for everyone stays selected, as WhatsApp
+    /// lets one select it; a message removed from the chat leaves the
+    /// selection with it.
     #[test]
-    fn selection_drops_messages_that_become_ineligible() {
+    fn selection_keeps_revoked_messages_and_drops_removed_ones() {
         let mut app = app();
         let (backend, events) = Backend::detached();
         app.backend = backend;
@@ -8797,17 +8814,9 @@ mod tests {
             .send(Event::MessageUpdated(Box::new(revoked)))
             .unwrap();
         app.handle_events();
-        assert_eq!(app.selection, Some((chat.into(), vec!["second".into()])));
+        let both = Some((chat.into(), vec!["first".into(), "second".into()]));
+        assert_eq!(app.selection, both);
         assert_eq!(app.selection_anchor.as_deref(), Some("second"));
-        assert!(app.sweep.as_ref().unwrap().base.is_empty());
-        app.apply(
-            Action::SweepMessages {
-                anchor: "first".into(),
-                to: "second".into(),
-            },
-            &ctx,
-        );
-        assert_eq!(app.selection, Some((chat.into(), vec!["second".into()])));
 
         app.apply(
             Action::DeleteForEveryone {
@@ -8816,7 +8825,7 @@ mod tests {
             },
             &ctx,
         );
-        assert_eq!(app.selection, Some((chat.into(), Vec::new())));
+        assert_eq!(app.selection, both);
 
         // Delete for me keeps the row until the deletion is accepted, then
         // drops it from the selection along with the message.
@@ -8836,8 +8845,54 @@ mod tests {
         assert!(app.conversations[chat].message("kept").is_none());
     }
 
+    /// Deleting the selection for me deletes each selected message, as Delete
+    /// for me does one, and closes the selection.
     #[test]
-    fn selection_rejects_messages_that_cannot_be_forwarded() {
+    fn deleting_the_selection_deletes_each_message_for_me() {
+        let mut app = app();
+        let (backend, mut commands) = Backend::recording();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        let chat = "1@s.whatsapp.net";
+        app.open_chat = Some(chat.into());
+        let mut poll = message(chat, "poll", 2);
+        poll.content = Content::Poll {
+            question: "Lunch?".into(),
+            options: vec!["Yes".into(), "No".into()],
+            state: Default::default(),
+        };
+        app.conversations.entry(chat.into()).or_default().merge(
+            vec![message(chat, "first", 1), poll, message(chat, "third", 3)],
+            false,
+        );
+        app.apply(Action::SelectMessage("first".into()), &ctx);
+        app.apply(Action::SelectRange("third".into()), &ctx);
+        let messages = vec!["first".to_owned(), "poll".into(), "third".into()];
+        assert_eq!(app.selection, Some((chat.into(), messages.clone())));
+        app.dialog = Some(Dialog::ConfirmDeleteSelected {
+            chat: chat.into(),
+            messages: messages.clone(),
+        });
+        // What the dialog's Delete pushes.
+        for action in crate::ui::dialogs::delete_selected(chat, &messages) {
+            app.apply(action, &ctx);
+        }
+        let deleted: Vec<String> = std::iter::from_fn(|| commands.try_recv().ok())
+            .filter_map(|command| match command {
+                Command::DeleteLocal { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deleted, messages);
+        assert!(app.selection.is_none());
+        assert!(app.dialog.is_none());
+    }
+
+    /// As in WhatsApp, any message can be selected, even one that cannot be
+    /// forwarded; only a message missing from the chat cannot. Forward then
+    /// waits, so `can_forward` still turns these away.
+    #[test]
+    fn any_message_in_the_chat_can_be_selected() {
         let mut app = app();
         let ctx = egui::Context::default();
         let chat = "1@s.whatsapp.net";
@@ -8873,31 +8928,36 @@ mod tests {
             .entry(chat.into())
             .or_default()
             .merge(messages, false);
-        for id in (0..5)
-            .map(|index| format!("blocked-{index}"))
-            .chain(std::iter::once("missing".into()))
-        {
+        let blocked: Vec<String> = (0..5).map(|index| format!("blocked-{index}")).collect();
+        for id in &blocked {
+            assert!(
+                !can_forward(&app.conversations[chat].message(id).unwrap().content),
+                "{id} cannot be forwarded"
+            );
             app.apply(Action::SelectMessage(id.clone()), &ctx);
-            assert!(app.selection.is_none(), "{id} cannot start a selection");
-            assert!(app.selection_anchor.is_none());
+            assert_eq!(
+                app.selection,
+                Some((chat.into(), vec![id.clone()])),
+                "{id} starts a selection"
+            );
             app.apply(Action::SelectMessage("first".into()), &ctx);
-            app.apply(Action::SelectMessage(id.clone()), &ctx);
             app.apply(Action::ToggleSelected(id.clone()), &ctx);
             assert_eq!(
                 app.selection,
-                Some((chat.into(), vec!["first".into()])),
-                "{id} cannot replace or join a selection"
+                Some((chat.into(), vec!["first".into(), id.clone()])),
+                "{id} joins a selection"
             );
-            assert_eq!(app.selection_anchor.as_deref(), Some("first"));
             app.apply(Action::CancelSelection, &ctx);
-            app.selection_anchor = None;
         }
+        app.apply(Action::SelectMessage("missing".into()), &ctx);
+        assert!(app.selection.is_none(), "a missing message selects nothing");
+        let every: Vec<String> = std::iter::once("first".to_owned())
+            .chain(blocked.iter().cloned())
+            .chain(std::iter::once("last".into()))
+            .collect();
         app.apply(Action::SelectMessage("first".into()), &ctx);
         app.apply(Action::SelectRange("last".into()), &ctx);
-        assert_eq!(
-            app.selection,
-            Some((chat.into(), vec!["first".into(), "last".into()]))
-        );
+        assert_eq!(app.selection, Some((chat.into(), every.clone())));
         app.apply(Action::CancelSelection, &ctx);
         app.apply(
             Action::SweepMessages {
@@ -8906,10 +8966,7 @@ mod tests {
             },
             &ctx,
         );
-        assert_eq!(
-            app.selection,
-            Some((chat.into(), vec!["first".into(), "last".into()]))
-        );
+        assert_eq!(app.selection, Some((chat.into(), every)));
     }
 
     /// #246: a sweep adds its range to what was selected when it began, in
@@ -8949,8 +9006,13 @@ mod tests {
         sweep(&mut app, "second");
         assert_eq!(
             selected(&app),
-            Some(vec!["second".into(), "fourth".into(), "fifth".into()]),
-            "what cannot be forwarded stays out"
+            Some(vec![
+                "second".into(),
+                "gone".into(),
+                "fourth".into(),
+                "fifth".into()
+            ]),
+            "a deleted message is swept too"
         );
         sweep(&mut app, "fourth");
         assert_eq!(selected(&app), Some(vec!["fourth".into(), "fifth".into()]));

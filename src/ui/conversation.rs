@@ -2113,10 +2113,13 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                         // While selecting, every row gains a check box in a
                         // column on the left and a band behind it, as in
                         // WhatsApp Web, painted under the row once its height
-                        // is known.
-                        let band = selection
-                            .as_ref()
-                            .map(|_| (ui.painter().add(egui::Shape::Noop), ui.cursor().top()));
+                        // is known. Holding Ctrl (Command on macOS) or Shift
+                        // makes a click on a row pick its message, so the row
+                        // shows the band then too.
+                        let picking = selection.is_none()
+                            && ui.input(|input| input.modifiers.command || input.modifiers.shift);
+                        let band = (selection.is_some() || picking)
+                            .then(|| (ui.painter().add(egui::Shape::Noop), ui.cursor().top()));
                         let response = if selection.is_some() {
                             ui.horizontal_top(|ui| {
                                 ui.add_space(SELECT_GUTTER);
@@ -2167,7 +2170,6 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                             (&selection, &response, band)
                         {
                             let checked = selected.contains(&message.id);
-                            let selectable = crate::app::can_select(&message.content);
                             // While selecting, a click anywhere on the row picks
                             // the message: its check box, text, links and media,
                             // and the strip beside it, from one edge of the view
@@ -2184,11 +2186,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                             let pick = ui.interact(
                                 row,
                                 bubble_id(&chat.id, &message.id).with("pick"),
-                                if selectable {
-                                    Sense::click_and_drag()
-                                } else {
-                                    Sense::hover()
-                                },
+                                Sense::click_and_drag(),
                             );
                             let fill = if checked {
                                 palette.accent.gamma_multiply(0.16)
@@ -2213,62 +2211,56 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                 pos2(ui.max_rect().left() + SELECT_BOX / 2.0, drawn.center().y),
                                 Vec2::splat(SELECT_BOX),
                             );
-                            // Only forwardable messages get a box.
-                            if selectable {
-                                select_box(ui, &palette, check, checked);
-                                if pick.has_focus()
-                                    && ui.ctx().data(|data| {
-                                        data.get_temp::<bool>(theme::keyboard_focus_id())
-                                            .unwrap_or(false)
-                                    })
-                                {
-                                    keyboard_navigation.set(true);
-                                }
-                                theme::reveal_focus(&pick);
-                                theme::focus_outline(ui, pick.id, check.expand(3.0), 4.0);
-                                pick.widget_info(|| {
-                                    let sender = if message.from_me {
-                                        crate::i18n::gettext(view.locale, "You").into_owned()
-                                    } else {
-                                        (view.names_or)(
-                                            &message.sender,
-                                            message.sender_name.as_deref(),
-                                        )
-                                    };
-                                    let summary: String =
-                                        message.content.summary().chars().take(120).collect();
-                                    let label = crate::i18n::gettext(
-                                        view.locale,
-                                        "Select message from {sender}, {time}: {summary}",
-                                    )
-                                    .replace("{sender}", &sender)
-                                    .replace(
-                                        "{time}",
-                                        &crate::util::moment_stamp(view.locale, message.timestamp),
-                                    )
-                                    .replace("{summary}", &summary);
-                                    egui::WidgetInfo::selected(
-                                        egui::WidgetType::Checkbox,
-                                        pick.enabled(),
-                                        checked,
-                                        label,
-                                    )
-                                });
-                                #[cfg(any(test, feature = "demo"))]
-                                ui.ctx().data_mut(|data| {
-                                    data.insert_temp(
-                                        bubble_id(&chat.id, &message.id).with("check"),
-                                        check,
-                                    );
-                                });
+                            select_box(ui, &palette, check, checked);
+                            if pick.has_focus()
+                                && ui.ctx().data(|data| {
+                                    data.get_temp::<bool>(theme::keyboard_focus_id())
+                                        .unwrap_or(false)
+                                })
+                            {
+                                keyboard_navigation.set(true);
                             }
+                            theme::reveal_focus(&pick);
+                            theme::focus_outline(ui, pick.id, check.expand(3.0), 4.0);
+                            pick.widget_info(|| {
+                                let sender = if message.from_me {
+                                    crate::i18n::gettext(view.locale, "You").into_owned()
+                                } else {
+                                    (view.names_or)(&message.sender, message.sender_name.as_deref())
+                                };
+                                let summary: String =
+                                    message.content.summary().chars().take(120).collect();
+                                let label = crate::i18n::gettext(
+                                    view.locale,
+                                    "Select message from {sender}, {time}: {summary}",
+                                )
+                                .replace("{sender}", &sender)
+                                .replace(
+                                    "{time}",
+                                    &crate::util::moment_stamp(view.locale, message.timestamp),
+                                )
+                                .replace("{summary}", &summary);
+                                egui::WidgetInfo::selected(
+                                    egui::WidgetType::Checkbox,
+                                    pick.enabled(),
+                                    checked,
+                                    label,
+                                )
+                            });
+                            #[cfg(any(test, feature = "demo"))]
+                            ui.ctx().data_mut(|data| {
+                                data.insert_temp(
+                                    bubble_id(&chat.id, &message.id).with("check"),
+                                    check,
+                                );
+                            });
                             if pick.drag_started() {
                                 actions.push(Action::SweepMessages {
                                     anchor: message.id.clone(),
                                     to: message.id.clone(),
                                 });
                             }
-                            if selectable && (response.clicked() || pick.clicked()) {
+                            if response.clicked() || pick.clicked() {
                                 let shift = ui.input(|input| input.modifiers.shift);
                                 actions.push(if shift {
                                     Action::SelectRange(message.id.clone())
@@ -2276,13 +2268,42 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                     Action::ToggleSelected(message.id.clone())
                                 });
                             }
-                        } else if let Some(response) = &response
-                            && response.clicked()
-                            && ui.input(|input| input.modifiers.command)
-                            && crate::app::can_select(&message.content)
+                        } else if let (true, Some(response), Some((slot, top))) =
+                            (picking, &response, band)
                         {
-                            // Ctrl-click (Command-click on macOS) starts a selection.
-                            actions.push(Action::SelectMessage(message.id.clone()));
+                            // With Ctrl (Command on macOS) or Shift held, a
+                            // click anywhere on the row starts a selection
+                            // with its message; a later Shift-click selects
+                            // the range up to another. Registered after the
+                            // row, so links, media and text inside do not
+                            // take the click as well.
+                            let row = Rect::from_x_y_ranges(
+                                viewport.x_range(),
+                                top..=ui.min_rect().bottom(),
+                            )
+                            .expand2(vec2(0.0, ui.spacing().item_spacing.y / 2.0));
+                            let pick = ui.interact(
+                                row,
+                                bubble_id(&chat.id, &message.id).with("pick"),
+                                Sense::click(),
+                            );
+                            if pick.hovered() {
+                                ui.painter().set(
+                                    slot,
+                                    egui::Shape::rect_filled(
+                                        row,
+                                        0.0,
+                                        palette.text.gamma_multiply(0.05),
+                                    ),
+                                );
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            // The bubble's own click too: egui picks a click's
+                            // widget from the frame before, which had no row
+                            // target when the key went down with the click.
+                            if pick.clicked() || response.clicked() {
+                                actions.push(Action::SelectMessage(message.id.clone()));
+                            }
                         }
                         if let Some(response) = response
                             && view.anchor == Some(message.id.as_str())
@@ -4181,7 +4202,7 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
     {
         actions.push(Action::Reply(message.id.clone()));
     }
-    if crate::app::can_select(&message.content)
+    if crate::app::can_forward(&message.content)
         && widgets::menu_item(ui, &palette, Some(Icon::Forward), "Forward")
     {
         actions.push(Action::ShowDialog(Dialog::Forward {
@@ -4189,9 +4210,7 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
             messages: vec![message.id.clone()],
         }));
     }
-    if crate::app::can_select(&message.content)
-        && widgets::menu_item(ui, &palette, Some(Icon::Check), "Select")
-    {
+    if widgets::menu_item(ui, &palette, Some(Icon::Check), "Select") {
         actions.push(Action::SelectMessage(message.id.clone()));
     }
     let text = match &message.content {
@@ -7188,19 +7207,48 @@ fn selection_bar(app: &mut App, ui: &mut egui::Ui, chat: &str, selected: &[Strin
             format!("{} selected", selected.len())
         };
         theme::text(ui, &count, theme::medium(14.5), palette.text);
+        // As in WhatsApp, any message can be selected, and Forward waits
+        // until every selected one can go.
+        let forwardable = app.conversations.get(chat).is_some_and(|conversation| {
+            selected.iter().all(|id| {
+                conversation
+                    .message(id)
+                    .is_some_and(|message| crate::app::can_forward(&message.content))
+            })
+        });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             // The selection stays open with nothing in it, as its check
-            // boxes do; there is nothing to forward until one is ticked.
+            // boxes do; there is nothing to act on until one is ticked.
             let forward = ui
-                .add_enabled_ui(!selected.is_empty(), |ui| {
+                .add_enabled_ui(!selected.is_empty() && forwardable, |ui| {
                     theme::pill_button(ui, &palette, "Forward…", true)
                 })
                 .inner;
+            let forward = if selected.is_empty() || forwardable {
+                forward
+            } else {
+                forward.on_disabled_hover_text(crate::i18n::gettext(
+                    app.locale,
+                    "Deleted messages, polls, and some others can't be forwarded",
+                ))
+            };
             if forward.clicked() {
                 app.actions.push(Action::ShowDialog(Dialog::Forward {
                     chat: chat.to_owned(),
                     messages: selected.to_vec(),
                 }));
+            }
+            let delete = ui
+                .add_enabled_ui(!selected.is_empty(), |ui| {
+                    theme::pill_button(ui, &palette, "Delete for me…", false)
+                })
+                .inner;
+            if delete.clicked() {
+                app.actions
+                    .push(Action::ShowDialog(Dialog::ConfirmDeleteSelected {
+                        chat: chat.to_owned(),
+                        messages: selected.to_vec(),
+                    }));
             }
         });
     });

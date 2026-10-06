@@ -1140,6 +1140,11 @@ pub enum Dialog {
         /// Revokes for everyone instead of deleting only this copy.
         for_everyone: bool,
     },
+    /// Confirms deleting the selected messages for me.
+    ConfirmDeleteSelected {
+        chat: ChatId,
+        messages: Vec<String>,
+    },
     /// Chooses a destination for an archived message.
     Forward {
         chat: ChatId,

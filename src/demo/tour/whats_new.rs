@@ -257,6 +257,13 @@ pub(super) fn script() -> Vec<Cue> {
             "Shift + click · Select the ones between",
         ),
     );
+    // The poll between them can't be forwarded, so Forward waits until it
+    // is left out.
+    add(68.5, Move(BubbleCorner("group-poll")));
+    add(
+        68.8,
+        ClickWith(left, command(), "Ctrl + click · Leave one out"),
+    );
     add(69.2, Move(Label("Forward…")));
     add(69.6, Click(left));
     add(71.8, esc("Esc · Close"));
