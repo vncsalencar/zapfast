@@ -1678,6 +1678,12 @@ pub enum Action {
     SetChatFont(Option<crate::settings::FontChoice>),
     /// Asks for a font file to draw the interface or the chat with.
     PickFont(crate::theme::FontSlot),
+    /// Sets how much room the interface's spacing takes; 1 is the default.
+    SetInterfaceDensity(f32),
+    /// Sets the spacing of the messages; 1 is the default.
+    SetChatDensity(f32),
+    /// Sets the line height of message text, as a multiple of the font's.
+    SetChatLineSpacing(f32),
     SetInterfaceLanguage(Option<crate::i18n::Locale>),
     SetCustomTheme(String),
     SetWallpaperColor(crate::settings::WallpaperColor),

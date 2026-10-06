@@ -4065,6 +4065,7 @@ mod tests {
                 "*Fixture body* 🙂",
                 &[],
                 &crate::markup::Style {
+                    line_spacing: 1.0,
                     size: 14.0,
                     color: palette.text,
                     secondary: palette.secondary,
@@ -6154,6 +6155,37 @@ mod tests {
                 })
             );
         }
+    }
+
+    /// A message bubble takes more room inside at a higher chat density and
+    /// less at a lower one, and its text's lines grow with the line spacing.
+    #[test]
+    fn a_bubble_follows_the_chat_density_and_line_spacing() {
+        let chat = sample_ids()[0].to_owned();
+        let bubble = |chat_density: f32, line_spacing: f32| {
+            let mut app = app();
+            app.settings.chat_density = chat_density;
+            app.settings.chat_line_spacing = line_spacing;
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            for _ in 0..3 {
+                render(&mut app, &ctx);
+            }
+            let id = crate::ui::conversation::bubble_id(&chat, "ada-reply");
+            ctx.data(|data| data.get_temp::<egui::Rect>(id.with("rect")))
+                .expect("the reply is on screen")
+        };
+        let normal = bubble(1.0, 1.0);
+        let compact = bubble(0.7, 1.0);
+        let spacious = bubble(1.4, 1.0);
+        let tall = bubble(1.0, 1.5);
+        assert!(compact.height() < normal.height(), "{compact:?} {normal:?}");
+        assert!(
+            spacious.height() > normal.height(),
+            "{spacious:?} {normal:?}"
+        );
+        assert!(spacious.width() > normal.width(), "{spacious:?} {normal:?}");
+        assert!(tall.height() > normal.height(), "{tall:?} {normal:?}");
     }
 
     /// Holding Ctrl or Shift, a click on a message's middle, over its text or

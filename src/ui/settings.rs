@@ -8,7 +8,7 @@ use crate::app::App;
 use crate::i18n::Locale;
 use crate::model::{Action, Dialog, Page};
 use crate::privacy::{PrivacyChoice, PrivacyKind};
-use crate::settings::{Settings, ThemeChoice, WallpaperColor};
+use crate::settings::{DENSITY_RANGE, LINE_SPACING_RANGE, Settings, ThemeChoice, WallpaperColor};
 use crate::theme::{self, Icon, Palette};
 use crate::wallpaper;
 
@@ -422,6 +422,40 @@ fn sections(app: &App) -> Vec<Section> {
             .clicked()
             {
                 app.actions.push(Action::ZoomBy(-0.1));
+            }
+        },
+    );
+    appearance.row(
+        translated(locale, "Interface density"),
+        translated(
+            locale,
+            "Room around the chat list, menus, dialogs, and Settings.",
+        ),
+        |ui, app| {
+            let value = app.settings.densities().interface;
+            if let Some(value) = spacing_slider(ui, app, value, &DENSITY_RANGE, percent) {
+                app.actions.push(Action::SetInterfaceDensity(value));
+            }
+        },
+    );
+    appearance.row(
+        translated(locale, "Chat density"),
+        translated(locale, "Room inside messages and between them."),
+        |ui, app| {
+            let value = app.settings.densities().chat;
+            if let Some(value) = spacing_slider(ui, app, value, &DENSITY_RANGE, percent) {
+                app.actions.push(Action::SetChatDensity(value));
+            }
+        },
+    );
+    appearance.row(
+        translated(locale, "Message line spacing"),
+        translated(locale, "Height of each line of message text."),
+        |ui, app| {
+            let value = app.settings.densities().line_spacing;
+            let times = |value: f32| format!("{value:.2}×");
+            if let Some(value) = spacing_slider(ui, app, value, &LINE_SPACING_RANGE, times) {
+                app.actions.push(Action::SetChatLineSpacing(value));
             }
         },
     );
@@ -1097,6 +1131,51 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
 
 /// The website's page on writing a theme.
 const THEMES_GUIDE: &str = "https://zapfast.rocks/themes/";
+
+/// A spacing value as a percentage of the default layout.
+fn percent(value: f32) -> String {
+    format!("{:.0}%", value * 100.0)
+}
+
+/// A spacing slider over `range` in steps of 0.05, its value shown by
+/// `label`, and Reset while it is away from the default, 1. Returns the new
+/// value when the reader moved it or reset it.
+fn spacing_slider(
+    ui: &mut egui::Ui,
+    app: &App,
+    value: f32,
+    range: &std::ops::RangeInclusive<f32>,
+    label: impl Fn(f32) -> String,
+) -> Option<f32> {
+    let palette = app.palette;
+    let mut changed = None;
+    // Right to left: Reset, the value, then the slider before them.
+    if (value - 1.0).abs() > f32::EPSILON
+        && theme::soft_button(
+            ui,
+            &palette,
+            None,
+            &crate::i18n::gettext(app.locale, "Reset"),
+            false,
+        )
+        .clicked()
+    {
+        changed = Some(1.0);
+    }
+    theme::text(ui, label(value), theme::medium(13.5), palette.text);
+    let mut moved = value;
+    ui.spacing_mut().slider_width = 140.0_f32.min(ui.available_width());
+    let response = ui.add(
+        egui::Slider::new(&mut moved, range.clone())
+            .step_by(0.05)
+            .show_value(false),
+    );
+    theme::reveal_focus(&response);
+    if response.changed() && (moved - value).abs() > f32::EPSILON {
+        changed = Some(moved);
+    }
+    changed
+}
 
 /// The interface's font menu.
 fn font_picker(ui: &mut egui::Ui, app: &mut App) {

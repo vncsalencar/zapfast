@@ -1680,6 +1680,11 @@ pub(crate) fn reply_strip_id() -> egui::Id {
 
 /// App data needed while drawing a checked-out conversation.
 struct View<'a> {
+    /// How much room the messages' spacing takes (Settings, Appearance);
+    /// 1 is the default layout.
+    density: f32,
+    /// Line height of message text, as a multiple of the font's own.
+    line_spacing: f32,
     palette: Palette,
     locale: crate::i18n::Locale,
     chat: &'a Chat,
@@ -1782,7 +1787,10 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
     let names_or = |id: &str, hint: Option<&str>| app.display_name_or(id, hint);
     let mention_names = |id: &str| app.mention_name(id);
     let keyboard_navigation = std::cell::Cell::new(false);
+    let densities = app.settings.densities();
     let view = View {
+        density: densities.chat,
+        line_spacing: densities.line_spacing,
         palette,
         locale: app.locale,
         chat,
@@ -1993,10 +2001,13 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                 }
             }
             Frame::new()
-                .inner_margin(Margin::symmetric(18, 10))
+                .inner_margin(Margin::symmetric(
+                    theme::scaled(18.0, view.density) as i8,
+                    theme::scaled(10.0, view.density) as i8,
+                ))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.spacing_mut().item_spacing.y = 3.0;
+                    ui.spacing_mut().item_spacing.y = theme::scaled(3.0, view.density);
                     top_of_history(ui, &palette, &conversation, chat, &mut actions);
                     let mut previous: Option<&Message> = None;
                     // Rows within a few viewports of the screen are laid out
@@ -2104,7 +2115,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                     || (!message.from_me && previous.sender != message.sender)
                             });
                         if first_in_run && !new_day && previous.is_some() {
-                            ui.add_space(RUN_GAP);
+                            ui.add_space(theme::scaled(RUN_GAP, view.density));
                         }
                         let flash = jump
                             .as_ref()
@@ -3347,16 +3358,17 @@ fn bubble_frame(
     // A picture without a caption carries its time over its corner, so
     // the bubble closes under it as evenly as it opens above it.
     let over_picture = time_over_picture(message);
+    let pad = |points: f32| theme::scaled(points, view.density) as i8;
     let inner = Frame::new()
         .inner_margin(Margin {
-            left: 10,
-            right: 10,
-            top: 6,
-            bottom: if over_picture { 6 } else { 5 },
+            left: pad(10.0),
+            right: pad(10.0),
+            top: pad(6.0),
+            bottom: pad(if over_picture { 6.0 } else { 5.0 }),
         })
         .show(ui, |ui| {
             ui.set_max_width(max_width);
-            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.spacing_mut().item_spacing.y = theme::scaled(4.0, view.density);
             if show_sender && view.chat.is_group() {
                 let name = (view.names_or)(&message.sender, message.sender_name.as_deref());
                 let response = widgets::rich_text(
@@ -3629,6 +3641,7 @@ fn natural_text_width(ui: &egui::Ui, view: &View<'_>, message: &Message, cap: f3
     };
     let style = markup::Style {
         size: BODY_SIZE,
+        line_spacing: view.line_spacing,
         color: palette.text,
         secondary: palette.secondary,
         link: palette.link,
@@ -5623,6 +5636,7 @@ fn rich_body(
     let mentions = mentions_of(view, message);
     let style = markup::Style {
         size: BODY_SIZE,
+        line_spacing: view.line_spacing,
         color: palette.text,
         secondary: palette.secondary,
         link: palette.link,

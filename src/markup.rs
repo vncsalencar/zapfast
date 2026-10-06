@@ -25,6 +25,8 @@ pub struct Mention {
 #[derive(Clone, Copy, Debug)]
 pub struct Style {
     pub size: f32,
+    /// Line height as a multiple of the font's own (Settings, Appearance).
+    pub line_spacing: f32,
     pub color: Color32,
     pub secondary: Color32,
     pub link: Color32,
@@ -39,6 +41,10 @@ pub struct Text {
     pub links: Vec<(Range<usize>, String)>,
     /// Whether the message is emoji-only and should use a larger size.
     pub big: bool,
+    /// The links' underline colour when it is drawn here rather than by
+    /// egui: in lines taller than the font, egui underlines at the bottom of
+    /// the line, well below the text.
+    link_underline: Option<Color32>,
     accessible_text: String,
 }
 
@@ -102,11 +108,20 @@ pub fn layout(
         } else {
             style.color
         };
+        // Taller lines only when asked for, so the default lays out as the
+        // font does.
+        let line_height = (style.line_spacing > 1.0).then(|| {
+            let natural = ui.ctx().fonts_mut(|fonts| fonts.row_height(&font_id));
+            (natural * style.line_spacing).round()
+        });
         let format = TextFormat {
             font_id,
+            line_height,
             color,
             italics: span.italic,
-            underline: if span.link.is_some() {
+            // In taller lines the underline is drawn under the text by
+            // `paint_link_underlines` instead.
+            underline: if span.link.is_some() && line_height.is_none() {
                 Stroke::new(1.0, style.link)
             } else {
                 Stroke::NONE
@@ -139,6 +154,7 @@ pub fn layout(
     Text {
         galley,
         placements,
+        link_underline: (style.line_spacing > 1.0 && !links.is_empty()).then_some(style.link),
         links,
         big,
         accessible_text: plain(text, mentions),
@@ -149,6 +165,36 @@ pub fn layout(
 pub fn paint(ui: &egui::Ui, text: &Text, pos: Pos2, fallback: Color32) {
     ui.painter().galley(pos, text.galley.clone(), fallback);
     emoji::paint(ui, &text.galley, pos, &text.placements);
+    paint_link_underlines(ui, text, pos);
+}
+
+/// Underlines the links of text laid out in taller lines just under their
+/// glyphs, where the font's own line ends, as egui would in lines of the
+/// font's height.
+fn paint_link_underlines(ui: &egui::Ui, text: &Text, pos: Pos2) {
+    let Some(color) = text.link_underline else {
+        return;
+    };
+    let stroke = Stroke::new(1.0, color);
+    let mut character = 0;
+    for placed in &text.galley.rows {
+        for glyph in &placed.row.glyphs {
+            if text
+                .links
+                .iter()
+                .any(|(range, _)| range.contains(&character))
+            {
+                let left = pos.x + placed.pos.x + glyph.pos.x;
+                let y = pos.y + placed.pos.y + glyph.pos.y - glyph.font_ascent + glyph.font_height;
+                ui.painter()
+                    .hline(left..=left + glyph.advance_width, y.round() - 0.5, stroke);
+            }
+            character += 1;
+        }
+        if placed.ends_with_newline {
+            character += 1;
+        }
+    }
 }
 
 /// Paints selectable text. The response must sense clicks and drags. Set
@@ -197,6 +243,7 @@ pub fn paint_selectable(
     );
     if visible {
         emoji::paint(ui, &text.galley, pos, &text.placements);
+        paint_link_underlines(ui, text, pos);
     }
 }
 
@@ -701,6 +748,56 @@ mod tests {
                 ("code".into(), false, false, false, true),
             ]
         );
+    }
+
+    /// Raised line spacing makes message lines taller, and links are then
+    /// underlined here, under their text, rather than by egui at the bottom
+    /// of the taller line.
+    #[test]
+    fn line_spacing_raises_lines_and_moves_link_underlines_here() {
+        let ctx = egui::Context::default();
+        let laid = |spacing: f32| {
+            let style = Style {
+                size: 14.5,
+                line_spacing: spacing,
+                color: Color32::WHITE,
+                secondary: Color32::GRAY,
+                link: Color32::LIGHT_BLUE,
+                mention: Color32::GREEN,
+            };
+            let mut text = None;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                text = Some(layout(
+                    ui,
+                    "one line\nand https://example.com",
+                    &[],
+                    &style,
+                    400.0,
+                ));
+            });
+            output.textures_delta.clear();
+            text.expect("laid out")
+        };
+        let normal = laid(1.0);
+        let tall = laid(1.5);
+        assert!(normal.link_underline.is_none());
+        assert_eq!(tall.link_underline, Some(Color32::LIGHT_BLUE));
+        let height = |text: &Text| text.galley.rect.height();
+        assert!(
+            height(&tall) > height(&normal) * 1.4,
+            "{} then {}",
+            height(&normal),
+            height(&tall)
+        );
+        let underlined = |text: &Text| {
+            text.galley
+                .job
+                .sections
+                .iter()
+                .any(|section| section.format.underline != Stroke::NONE)
+        };
+        assert!(underlined(&normal), "egui underlines at the font's height");
+        assert!(!underlined(&tall), "taller lines are underlined here");
     }
 
     #[test]

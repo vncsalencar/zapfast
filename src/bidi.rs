@@ -1243,6 +1243,7 @@ mod tests {
                 },
                 |ui| {
                     let style = crate::markup::Style {
+                        line_spacing: 1.0,
                         size: 14.5,
                         color: Color32::WHITE,
                         secondary: Color32::GRAY,
@@ -1274,6 +1275,7 @@ mod tests {
                 },
                 |ui| {
                     let style = crate::markup::Style {
+                        line_spacing: 1.0,
                         size: 14.5,
                         color: Color32::WHITE,
                         secondary: Color32::GRAY,

@@ -4294,7 +4294,8 @@ impl App {
         ctx.set_theme(preference);
         if self.applied_dark.is_none() || self.palette != palette {
             self.palette = palette;
-            crate::theme::apply(ctx, &self.palette);
+            // The palette's style is laid out at the saved density.
+            crate::theme::apply(ctx, &self.palette, self.settings.densities().interface);
             self.applied_dark = Some(dark);
         }
     }
@@ -5654,6 +5655,22 @@ impl App {
                 self.choose_font(ctx, theme::FontSlot::Interface, Some(choice));
             }
             Action::SetChatFont(choice) => self.choose_font(ctx, theme::FontSlot::Chat, choice),
+            Action::SetInterfaceDensity(density) => {
+                self.settings.interface_density = density;
+                self.mark_settings_dirty();
+                crate::theme::set_density(ctx, self.settings.densities().interface);
+                ctx.request_repaint();
+            }
+            Action::SetChatDensity(density) => {
+                self.settings.chat_density = density;
+                self.mark_settings_dirty();
+                ctx.request_repaint();
+            }
+            Action::SetChatLineSpacing(spacing) => {
+                self.settings.chat_line_spacing = spacing;
+                self.mark_settings_dirty();
+                ctx.request_repaint();
+            }
             Action::PickFont(slot) => {
                 if self.font_pick.is_none() {
                     let (picked, receiver) = std::sync::mpsc::channel();
@@ -10019,6 +10036,24 @@ mod tests {
         app.open_chat = None;
         app.tick_video(&ctx);
         assert!(app.video.message().is_none());
+    }
+
+    /// The chat's density and line spacing sliders save their values, which
+    /// the layout reads clamped.
+    #[test]
+    fn the_chat_spacing_sliders_save_their_values() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.apply(Action::SetChatDensity(0.8), &ctx);
+        app.apply(Action::SetChatLineSpacing(1.25), &ctx);
+        assert_eq!(app.settings.chat_density, 0.8);
+        assert_eq!(app.settings.chat_line_spacing, 1.25);
+        assert!(app.settings_dirty);
+        app.apply(Action::SetChatDensity(5.0), &ctx);
+        assert_eq!(
+            app.settings.densities().chat,
+            *crate::settings::DENSITY_RANGE.end()
+        );
     }
 
     /// Choosing a font saves the choice and installs it at once.

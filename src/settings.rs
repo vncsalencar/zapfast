@@ -136,6 +136,39 @@ impl Settings {
     }
 }
 
+/// The range of the interface and chat density sliders: compact to
+/// spacious around the default layout.
+pub const DENSITY_RANGE: std::ops::RangeInclusive<f32> = 0.7..=1.4;
+
+/// The range of the message line spacing slider.
+pub const LINE_SPACING_RANGE: std::ops::RangeInclusive<f32> = 1.0..=1.6;
+
+/// The spacing the layout uses, each value clamped to its slider's range so
+/// a hand-edited or damaged settings file cannot crush or explode it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Densities {
+    pub interface: f32,
+    pub chat: f32,
+    pub line_spacing: f32,
+}
+
+impl Settings {
+    pub fn densities(&self) -> Densities {
+        let clamp = |value: f32, range: &std::ops::RangeInclusive<f32>| {
+            if value.is_finite() {
+                value.clamp(*range.start(), *range.end())
+            } else {
+                1.0
+            }
+        };
+        Densities {
+            interface: clamp(self.interface_density, &DENSITY_RANGE),
+            chat: clamp(self.chat_density, &DENSITY_RANGE),
+            line_spacing: clamp(self.chat_line_spacing, &LINE_SPACING_RANGE),
+        }
+    }
+}
+
 /// A custom font used before: the file it was chosen by, and its family's
 /// name, so a picker can offer it without reading it again.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -511,6 +544,14 @@ pub struct Settings {
     pub system_theme_cache: Option<crate::theme::CustomTheme>,
     /// egui zoom factor.
     pub zoom: f32,
+    /// How much room the interface's spacing takes, from compact to
+    /// spacious; 1 is the default layout. Read through [`Settings::densities`].
+    pub interface_density: f32,
+    /// The same for the messages: the padding in bubbles and the gaps
+    /// between them.
+    pub chat_density: f32,
+    /// Line height of message text, as a multiple of the font's own.
+    pub chat_line_spacing: f32,
     pub sidebar_width: f32,
     /// Width of the search pane beside the open chat.
     pub search_pane_width: f32,
@@ -626,6 +667,9 @@ impl Default for Settings {
             custom_theme_cache: None,
             system_theme_cache: None,
             zoom: 1.0,
+            interface_density: 1.0,
+            chat_density: 1.0,
+            chat_line_spacing: 1.0,
             sidebar_width: 320.0,
             search_pane_width: 380.0,
             enter_sends: true,
@@ -1047,6 +1091,38 @@ mod tests {
         assert_eq!(settings.filter_chip_order(), parsed.filter_chip_order());
         settings.set_filter_chip_order(&FilterChip::DEFAULT_ORDER);
         assert!(settings.filter_chip_order.is_empty());
+    }
+
+    /// Older settings keep the default spacing, and values outside the
+    /// sliders' ranges, or not numbers, cannot reach the layout.
+    #[test]
+    fn densities_default_to_the_layout_and_stay_in_range() {
+        let older: Settings = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
+        assert_eq!(
+            older.densities(),
+            Densities {
+                interface: 1.0,
+                chat: 1.0,
+                line_spacing: 1.0
+            }
+        );
+        let wild: Settings = serde_json::from_str(
+            r#"{"interface_density":9.0,"chat_density":-1.0,"chat_line_spacing":0.2}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            wild.densities(),
+            Densities {
+                interface: *DENSITY_RANGE.end(),
+                chat: *DENSITY_RANGE.start(),
+                line_spacing: *LINE_SPACING_RANGE.start()
+            }
+        );
+        let broken = Settings {
+            chat_density: f32::NAN,
+            ..Settings::default()
+        };
+        assert_eq!(broken.densities().chat, 1.0);
     }
 
     /// The pickers remember the newest custom fonts, each once.

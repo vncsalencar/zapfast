@@ -94,6 +94,12 @@ name or description, in the interface language or in English.
 - **Wallpaper**: WhatsApp's light and dark chat wallpaper colours, with or
   without doodles.
 - **Zoom**: interface scale, also `Ctrl+Plus`, `Ctrl+Minus` and `Ctrl+0`.
+- **Interface density** and **Chat density**: how much room the spacing
+  takes, from 70% to 140% of the default, without changing text size. The
+  first covers the chat list, menus, dialogs, and Settings; the second the
+  padding inside messages and the gaps between them.
+- **Message line spacing**: the height of each line of message text, from the
+  font's own (1.00×) to 1.60×.
 - **Language**: the interface language, or **Auto** to follow the system.
   Brazilian Portuguese, German, Spanish, Italian, French, Russian, Simplified
   Chinese, Traditional Chinese, Turkish, and Indonesian are available; otherwise English.

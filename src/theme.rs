@@ -395,8 +395,37 @@ pub fn install(ctx: &egui::Context) {
     ctx.options_mut(|options| options.reduce_texture_memory = true);
 }
 
-/// Applies the palette to egui widgets.
-pub fn apply(ctx: &egui::Context, palette: &Palette) {
+/// Lays egui's own spacing (between widgets, inside buttons, menus and
+/// dialogs) out at `density` times the default, when the interface density
+/// changes; [`apply`] lays it out with the palette.
+pub fn set_density(ctx: &egui::Context, density: f32) {
+    let mut style = (*ctx.global_style()).clone();
+    spacing_at(&mut style.spacing, density);
+    ctx.set_global_style(style);
+}
+
+/// egui's spacing at `density` times the default.
+fn spacing_at(spacing: &mut egui::style::Spacing, density: f32) {
+    let margin = |points: f32| egui::Margin::same(scaled(points, density) as i8);
+    spacing.item_spacing = Vec2::new(8.0, 6.0) * density;
+    spacing.button_padding = Vec2::new(12.0, 6.0) * density;
+    spacing.menu_margin = margin(6.0);
+    spacing.window_margin = margin(16.0);
+}
+
+/// `points` at `density` times, whole so edges stay on pixels.
+pub fn scaled(points: f32, density: f32) -> f32 {
+    (points * density).round()
+}
+
+/// A chat list row's height at an interface density.
+pub fn row_height(density: f32) -> f32 {
+    scaled(ROW_HEIGHT, density)
+}
+
+/// Applies the palette to egui widgets, their spacing at the interface
+/// `density` (Settings, Appearance).
+pub fn apply(ctx: &egui::Context, palette: &Palette, density: f32) {
     let mut style = (*ctx.global_style()).clone();
     let visuals = &mut style.visuals;
     *visuals = if palette.dark {
@@ -463,11 +492,8 @@ pub fn apply(ctx: &egui::Context, palette: &Palette) {
         (TextStyle::Monospace, FontId::new(13.0, Monospace)),
     ]
     .into();
-    style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-    style.spacing.button_padding = Vec2::new(12.0, 6.0);
     style.spacing.interact_size = Vec2::new(40.0, 28.0);
-    style.spacing.menu_margin = egui::Margin::same(6);
-    style.spacing.window_margin = egui::Margin::same(16);
+    spacing_at(&mut style.spacing, density);
     style.spacing.scroll = egui::style::ScrollStyle {
         bar_width: 8.0,
         floating_width: 6.0,
@@ -1535,12 +1561,39 @@ mod tests {
 
     /// The palette decides the theme, and the desktop's rendering its text
     /// options: linear coverage in both themes on Linux, as GTK draws it.
+    /// egui's spacing and the chat list's rows follow the interface density,
+    /// and the default lays them out as before.
+    #[test]
+    fn spacing_follows_the_interface_density() {
+        let ctx = egui::Context::default();
+        let spacing = |ctx: &egui::Context| ctx.global_style().spacing.clone();
+        apply(&ctx, &Palette::dark(), 1.0);
+        let normal = spacing(&ctx);
+        assert_eq!(normal.item_spacing, Vec2::new(8.0, 6.0));
+        assert_eq!(normal.button_padding, Vec2::new(12.0, 6.0));
+        assert_eq!(normal.window_margin, egui::Margin::same(16));
+        assert_eq!(normal.menu_margin, egui::Margin::same(6));
+        set_density(&ctx, 1.4);
+        let spacious = spacing(&ctx);
+        assert_eq!(spacious.item_spacing, Vec2::new(8.0, 6.0) * 1.4);
+        assert_eq!(spacious.window_margin, egui::Margin::same(22));
+        apply(&ctx, &Palette::light(), 0.7);
+        let compact = spacing(&ctx);
+        assert_eq!(compact.window_margin, egui::Margin::same(11));
+        assert_eq!(compact.menu_margin, egui::Margin::same(4));
+        // The interaction size is not spacing, so it stays.
+        assert_eq!(compact.interact_size, normal.interact_size);
+        assert_eq!(row_height(1.0), ROW_HEIGHT);
+        assert_eq!(row_height(0.7), 48.0);
+        assert_eq!(row_height(1.4), 95.0);
+    }
+
     #[test]
     fn text_follows_the_desktop_rendering_in_both_themes() {
         let rendering = text_rendering();
         for palette in [Palette::dark(), Palette::light()] {
             let ctx = egui::Context::default();
-            apply(&ctx, &palette);
+            apply(&ctx, &palette, 1.0);
             let options = ctx.global_style().visuals.text_options;
             assert_eq!(
                 options.color_transfer_function,

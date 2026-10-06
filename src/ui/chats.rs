@@ -727,7 +727,7 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
     }
     // Rows touch: one clickable surface from top to bottom, no gaps or rules.
     ui.spacing_mut().item_spacing.y = 0.0;
-    let row_height = theme::ROW_HEIGHT;
+    let row_height = theme::row_height(app.settings.densities().interface);
     let total = chats.len();
     let mut scroll_area = egui::ScrollArea::vertical()
         .id_salt("chat-list")
@@ -833,7 +833,10 @@ fn locked_entry(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let count = app.locked_count();
     let (rect, response) = ui.allocate_exact_size(
-        vec2(ui.available_width(), theme::ROW_HEIGHT),
+        vec2(
+            ui.available_width(),
+            theme::row_height(app.settings.densities().interface),
+        ),
         Sense::click(),
     );
     if ui.is_rect_visible(rect) {
@@ -901,17 +904,22 @@ fn locked_list(app: &mut App, ui: &mut egui::Ui) {
             current,
             ui.available_height(),
             target_row,
-            theme::ROW_HEIGHT,
+            theme::row_height(app.settings.densities().interface),
             ui.spacing().item_spacing.y,
         );
         scroll_area = scroll_area.vertical_scroll_offset(offset);
         app.scroll_chat_into_view = None;
     }
-    scroll_area.show_rows(ui, theme::ROW_HEIGHT, chats.len(), |ui, range| {
-        for chat in &chats[range] {
-            ui.push_id(("chat", &chat.id), |ui| row(app, ui, chat));
-        }
-    });
+    scroll_area.show_rows(
+        ui,
+        theme::row_height(app.settings.densities().interface),
+        chats.len(),
+        |ui, range| {
+            for chat in &chats[range] {
+                ui.push_id(("chat", &chat.id), |ui| row(app, ui, chat));
+            }
+        },
+    );
 }
 
 /// Returns the smallest offset that fully reveals a fixed-height row.
@@ -1015,7 +1023,10 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
         None => app.display_name_or(&hit.chat, None),
     };
     let (rect, response) = ui.allocate_exact_size(
-        vec2(ui.available_width(), theme::ROW_HEIGHT),
+        vec2(
+            ui.available_width(),
+            theme::row_height(app.settings.densities().interface),
+        ),
         Sense::click(),
     );
     theme::reveal_focus(&response);
@@ -1023,8 +1034,10 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
         if response.hovered() {
             widgets::row_highlight(ui, &palette, rect, palette.surface_hover);
         }
-        let avatar_rect =
-            Rect::from_center_size(pos2(rect.left() + 38.0, rect.center().y), Vec2::splat(48.0));
+        let avatar_rect = Rect::from_center_size(
+            pos2(rect.left() + 38.0, rect.center().y),
+            Vec2::splat(row_avatar(rect.height())),
+        );
         let picture = app.avatar(&hit.chat);
         widgets::paint_avatar(
             ui,
@@ -1041,7 +1054,7 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
             theme::regular(11.5),
             palette.dim,
         );
-        let name_top = rect.top() + 14.0;
+        let name_top = rect.center().y - 20.0;
         ui.painter().galley(
             pos2(right - stamp_galley.size().x, name_top + 1.0),
             stamp_galley.clone(),
@@ -1051,7 +1064,7 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
         let name = widgets::line(ui, &title, theme::medium(14.5), palette.text, name_width, 1);
         name.paint(ui, pos2(left, name_top), palette.text);
         // Show the sender for group messages.
-        let line_y = rect.top() + 38.0;
+        let line_y = rect.center().y + 4.0;
         let mut x = left;
         if hit.from_me {
             let who = widgets::line(
@@ -1130,7 +1143,10 @@ fn person_row(
 ) -> egui::Response {
     let palette = app.palette;
     let (rect, response) = ui.allocate_exact_size(
-        vec2(ui.available_width(), theme::ROW_HEIGHT),
+        vec2(
+            ui.available_width(),
+            theme::row_height(app.settings.densities().interface),
+        ),
         Sense::click(),
     );
     theme::reveal_focus(&response);
@@ -1138,8 +1154,10 @@ fn person_row(
         if response.hovered() {
             widgets::row_highlight(ui, &palette, rect, palette.surface_hover);
         }
-        let avatar_rect =
-            Rect::from_center_size(pos2(rect.left() + 38.0, rect.center().y), Vec2::splat(48.0));
+        let avatar_rect = Rect::from_center_size(
+            pos2(rect.left() + 38.0, rect.center().y),
+            Vec2::splat(row_avatar(rect.height())),
+        );
         let picture = app.avatar(id);
         widgets::paint_avatar(ui, &palette, avatar_rect, name, id, picture.as_deref());
         let left = rect.left() + 76.0;
@@ -1151,7 +1169,7 @@ fn person_row(
             rect.right() - 14.0 - left,
             1,
         );
-        name_line.paint(ui, pos2(left, rect.top() + 14.0), palette.text);
+        name_line.paint(ui, pos2(left, rect.center().y - 20.0), palette.text);
         if let Some(detail) = detail {
             let phone_line = widgets::line(
                 ui,
@@ -1161,10 +1179,16 @@ fn person_row(
                 rect.right() - 14.0 - left,
                 1,
             );
-            phone_line.paint(ui, pos2(left, rect.top() + 38.0), palette.dim);
+            phone_line.paint(ui, pos2(left, rect.center().y + 4.0), palette.dim);
         }
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The avatar in a list row as tall as `row`: 48 points, smaller once a
+/// compact row would leave it no room above and below.
+fn row_avatar(row: f32) -> f32 {
+    (row - 12.0).clamp(28.0, 48.0)
 }
 
 fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
@@ -1181,7 +1205,10 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
     let now = crate::util::now();
     let muted = chat.muted(now);
     let (rect, response) = ui.allocate_exact_size(
-        vec2(ui.available_width(), theme::ROW_HEIGHT),
+        vec2(
+            ui.available_width(),
+            theme::row_height(app.settings.densities().interface),
+        ),
         Sense::click(),
     );
     theme::reveal_focus(&response);
@@ -1201,8 +1228,10 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
         } else if response.hovered() {
             widgets::row_highlight(ui, &palette, rect, palette.surface_hover);
         }
-        let avatar_rect =
-            Rect::from_center_size(pos2(rect.left() + 38.0, rect.center().y), Vec2::splat(48.0));
+        let avatar_rect = Rect::from_center_size(
+            pos2(rect.left() + 38.0, rect.center().y),
+            Vec2::splat(row_avatar(rect.height())),
+        );
         let picture = app.avatar(&chat.id);
         widgets::paint_avatar(
             ui,
@@ -1232,7 +1261,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
         let stamp_galley = ui
             .painter()
             .layout_no_wrap(stamp, theme::regular(11.5), stamp_color);
-        let name_top = rect.top() + 14.0;
+        let name_top = rect.center().y - 20.0;
         ui.painter().galley(
             pos2(right - stamp_galley.size().x, name_top + 1.0),
             stamp_galley.clone(),
@@ -1249,7 +1278,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
 
         // Leave room for badges beside the latest-message preview.
         let mut badge_right = right;
-        let line_y = rect.top() + 38.0;
+        let line_y = rect.center().y + 4.0;
         if unread {
             let width = widgets::unread_indicator(
                 ui,
@@ -1913,6 +1942,16 @@ mod tests {
     use super::*;
     use crate::paths::AppDirs;
     use crate::settings::Settings;
+
+    /// A row's avatar keeps its size until a compact row leaves it no room
+    /// above and below, and never shrinks past legibility.
+    #[test]
+    fn row_avatars_shrink_only_in_compact_rows() {
+        assert_eq!(row_avatar(theme::row_height(1.0)), 48.0);
+        assert_eq!(row_avatar(theme::row_height(1.4)), 48.0);
+        assert_eq!(row_avatar(theme::row_height(0.7)), 36.0);
+        assert_eq!(row_avatar(20.0), 28.0);
+    }
 
     /// Message previews take the chat's font only when Settings asks, and
     /// the full-message tooltip keeps the sender's name in the interface's.
