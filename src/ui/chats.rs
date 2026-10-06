@@ -1049,6 +1049,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
         } else {
             palette.dim
         };
+        let message_font = preview_font(app, ui.ctx());
         let preview = if !typing.is_empty() {
             let who = if chat.is_group() {
                 format!("{} is typing…", typing[0].1.trim_start_matches('~'))
@@ -1080,7 +1081,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
             widgets::line(
                 ui,
                 &draft,
-                theme::regular(13.0),
+                message_font,
                 preview_color,
                 (badge_right - x).max(0.0),
                 1,
@@ -1111,7 +1112,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
             let words = widgets::line(
                 ui,
                 &crate::markup::plain(&app.resolve_mention_tokens(&last.summary), &[]),
-                theme::regular(13.0),
+                message_font,
                 preview_color,
                 (badge_right - x).max(0.0),
                 1,
@@ -1204,6 +1205,16 @@ pub fn preview_id(chat: &str) -> egui::Id {
     egui::Id::new(("chat-preview", chat))
 }
 
+/// The font of a chat row's message preview and draft: the chat's when
+/// Settings asks for it in the chat list, else the interface's.
+fn preview_font(app: &App, ctx: &egui::Context) -> egui::FontId {
+    if app.settings.chat_font_in_previews {
+        theme::chat_font(ctx, fastframe_fonts::Weight::Regular, 13.0)
+    } else {
+        theme::regular(13.0)
+    }
+}
+
 /// Shows the whole last message while the pointer rests on a chat row's
 /// cut-short preview, as WhatsApp Web does. It keeps out of the way of an
 /// open menu and of a drag.
@@ -1223,15 +1234,14 @@ fn full_preview_tooltip(
         .width(FULL_PREVIEW_WIDTH)
         .show(|ui| {
             let full: String = full.chars().take(FULL_PREVIEW_CHARS).collect();
-            let text = format!(
-                "{prefix}{}",
-                crate::markup::plain(&app.resolve_mention_tokens(&full), &[])
-            );
+            let text = crate::markup::plain(&app.resolve_mention_tokens(&full), &[]);
             let color = ui.visuals().text_color();
-            let line = widgets::line(
+            // The sender's name keeps the interface's font.
+            let line = widgets::line_with_prefix(
                 ui,
+                (prefix, theme::regular(13.0)),
                 text.trim_end(),
-                theme::regular(13.0),
+                preview_font(app, ui.ctx()),
                 color,
                 FULL_PREVIEW_WIDTH,
                 FULL_PREVIEW_ROWS,
@@ -1670,6 +1680,47 @@ mod tests {
     use super::*;
     use crate::paths::AppDirs;
     use crate::settings::Settings;
+
+    /// Message previews take the chat's font only when Settings asks, and
+    /// the full-message tooltip keeps the sender's name in the interface's.
+    #[test]
+    fn previews_draw_in_the_chat_font_when_asked() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _events) =
+            App::headless(AppDirs::under(directory.path()), Settings::default());
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let chat_family = egui::FontFamily::Name(
+            format!("zapfast-chat-{}", fastframe_fonts::Weight::Regular.name()).into(),
+        );
+        let mut fonts = (None, None, Vec::new());
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            fonts.0 = Some(preview_font(&app, ui.ctx()).family);
+            app.settings.chat_font_in_previews = true;
+            fonts.1 = Some(preview_font(&app, ui.ctx()).family);
+            let line = widgets::line_with_prefix(
+                ui,
+                ("Mira: ", theme::regular(13.0)),
+                "Bring the bread",
+                preview_font(&app, ui.ctx()),
+                egui::Color32::WHITE,
+                FULL_PREVIEW_WIDTH,
+                FULL_PREVIEW_ROWS,
+            );
+            fonts.2 = line
+                .galley
+                .job
+                .sections
+                .iter()
+                .map(|section| section.format.font_id.family.clone())
+                .collect();
+        });
+        output.textures_delta.clear();
+        assert_eq!(fonts.0, Some(egui::FontFamily::Proportional));
+        assert_eq!(fonts.1, Some(chat_family.clone()));
+        assert_eq!(fonts.2.first(), Some(&egui::FontFamily::Proportional));
+        assert_eq!(fonts.2.last(), Some(&chat_family));
+    }
 
     #[test]
     fn chat_context_menu_stays_compact_in_wide_windows() {
