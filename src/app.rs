@@ -355,6 +355,9 @@ pub struct App {
     /// The font file dialog while it is open. The font is the process's,
     /// not an account's, so the dialog does not go through a backend.
     font_pick: Option<std::sync::mpsc::Receiver<std::path::PathBuf>>,
+    /// A custom font family being read, and whether the reader chose it
+    /// just now (saved, and refused with a toast) rather than at startup.
+    font_load: Option<(theme::FontLoad, bool)>,
     applied_dark: Option<bool>,
     /// Reveals a new palette from the middle of the window outwards.
     theme_transition: fastframe_theme::Transition,
@@ -986,6 +989,7 @@ impl App {
             palette,
             custom_themes: theme::Catalog::default(),
             font_pick: None,
+            font_load: None,
             applied_dark: None,
             theme_transition: fastframe_theme::Transition::default(),
             reveal_theme_changes: !cfg!(test),
@@ -1638,10 +1642,11 @@ impl App {
         // Colour emoji in labels, menus, tooltips and text fields; message
         // bodies paint their own over placeholders, which it leaves alone.
         ctx.add_plugin(crate::emoji::plugin());
-        // A custom font file that went missing draws in the platform's font
-        // and stays chosen, so it returns when the file does.
-        if let Err(error) = crate::theme::set_font(ctx, &self.settings.font) {
-            log::warn!("could not use the chosen font file: {error}");
+        // A custom family is read on a thread and replaces the platform's
+        // font once it arrives; a new window keeps one already read.
+        if !crate::theme::font_installed(&self.settings.font) {
+            crate::theme::set_font(ctx, &self.settings.font, None);
+            self.start_font_load(self.settings.font.clone(), false);
         }
         crate::theme::install(ctx);
         // Zoom stays in the settings, so egui must not change it behind the
@@ -3953,6 +3958,47 @@ impl App {
         );
     }
 
+    /// Starts reading a custom font family off the interface thread; built-in
+    /// choices start nothing. A newer choice replaces one still being read.
+    fn start_font_load(&mut self, choice: crate::settings::FontChoice, chosen_now: bool) {
+        let waker = self.waker.clone();
+        if let Some(load) = theme::FontLoad::start(choice, move || waker.wake()) {
+            self.font_load = Some((load, chosen_now));
+        }
+    }
+
+    /// Installs a custom family once it has been read. One chosen just now
+    /// is saved, or refused with a toast; the saved one failing at startup
+    /// draws in the platform's font and stays chosen, so it returns when
+    /// its file does.
+    fn poll_font_load(&mut self, ctx: &egui::Context) {
+        let Some((load, chosen_now)) = &self.font_load else {
+            return;
+        };
+        let Some(result) = load.poll() else {
+            return;
+        };
+        let chosen_now = *chosen_now;
+        let Some((load, _)) = self.font_load.take() else {
+            return;
+        };
+        match result {
+            Ok(family) => {
+                theme::set_font(ctx, &load.choice, Some(family));
+                if chosen_now {
+                    self.settings.font = load.choice;
+                    self.mark_settings_dirty();
+                }
+                ctx.request_repaint();
+            }
+            Err(error) if chosen_now => {
+                let message = crate::i18n::gettext(self.locale, "Could not use this font");
+                self.toast_error(format!("{message}: {error}"));
+            }
+            Err(error) => log::warn!("could not use the chosen font file: {error}"),
+        }
+    }
+
     /// Applies a font file once its dialog closes with one.
     fn poll_font_pick(&mut self) {
         let Some(receiver) = &self.font_pick else {
@@ -5380,17 +5426,19 @@ impl App {
                 self.mark_settings_dirty();
                 self.apply_theme(ctx);
             }
-            Action::SetFont(choice) => match crate::theme::set_font(ctx, &choice) {
-                Ok(()) => {
+            Action::SetFont(choice) => {
+                if matches!(choice, crate::settings::FontChoice::Custom(_)) {
+                    // Saved once its family has been read and installed.
+                    self.start_font_load(choice, true);
+                } else {
+                    // Overrides a custom family still being read.
+                    self.font_load = None;
+                    crate::theme::set_font(ctx, &choice, None);
                     self.settings.font = choice;
                     self.mark_settings_dirty();
                     ctx.request_repaint();
                 }
-                Err(error) => {
-                    let message = crate::i18n::gettext(self.locale, "Could not use this font");
-                    self.toast_error(format!("{message}: {error}"));
-                }
-            },
+            }
             Action::PickFont => {
                 if self.font_pick.is_none() {
                     let (picked, receiver) = std::sync::mpsc::channel();
@@ -5813,6 +5861,7 @@ impl App {
         self.handle_control_commands();
         self.poll_custom_themes();
         self.poll_font_pick();
+        self.poll_font_load(ctx);
         let wallpaper = self.account().settings.wallpaper_image.clone();
         self.wallpaper_image.sync(wallpaper.as_deref(), &self.waker);
         self.handle_notification_opens();
@@ -9500,8 +9549,10 @@ mod tests {
         assert!(!crate::theme::inter_chosen());
     }
 
-    /// A font file goes in front of every weight; a file that is not a
-    /// font is refused with a toast and the typeface stays as it was.
+    /// A font file is read off the interface thread, then goes in front of
+    /// every weight and is saved; a file that is not a font is refused with
+    /// a toast and the typeface stays as it was; a built-in choice made
+    /// while a family is still being read wins over it.
     #[test]
     fn a_custom_font_file_is_installed_and_a_bad_one_refused() {
         use crate::settings::FontChoice;
@@ -9524,17 +9575,36 @@ mod tests {
                     .is_some_and(|name| name.starts_with("zapfast-custom-"))
             })
         };
+        let finish_loading = |app: &mut App, ctx: &egui::Context| {
+            for _ in 0..500 {
+                app.poll_font_load(ctx);
+                if app.font_load.is_none() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("the font never finished loading");
+        };
         let mut app = app();
         let ctx = egui::Context::default();
         app.attach(&ctx);
         app.apply(Action::SetFont(FontChoice::Custom(font.clone())), &ctx);
+        // Nothing changes until the family has been read.
+        assert_eq!(app.settings.font, FontChoice::System);
+        finish_loading(&mut app, &ctx);
         assert_eq!(app.settings.font, FontChoice::Custom(font.clone()));
         assert!(leads_with_custom(&ctx));
 
         app.apply(Action::SetFont(FontChoice::Custom(broken)), &ctx);
-        assert_eq!(app.settings.font, FontChoice::Custom(font));
+        finish_loading(&mut app, &ctx);
+        assert_eq!(app.settings.font, FontChoice::Custom(font.clone()));
         assert!(leads_with_custom(&ctx));
         assert!(!app.toasts.is_empty());
+
+        app.apply(Action::SetFont(FontChoice::Custom(font)), &ctx);
+        app.apply(Action::SetFont(FontChoice::Inter), &ctx);
+        assert!(app.font_load.is_none());
+        assert_eq!(app.settings.font, FontChoice::Inter);
     }
 
     /// A video opens over the window at a size worth the room, goes back to
