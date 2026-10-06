@@ -2635,12 +2635,12 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                         [x * 5, 120, 255 - y * 5, 255]
                     })
                     .collect();
-                app.pending.push(crate::app::Pending::Picture {
-                    width: side,
-                    height: side,
-                    rgba: std::sync::Arc::new(rgba),
-                    texture: None,
-                });
+                app.pending.push(crate::app::Pending::picture(
+                    side,
+                    side,
+                    std::sync::Arc::new(rgba),
+                    || {},
+                ));
                 app.pending.push(crate::app::Pending::File(photo));
                 app.pending
                     .push(crate::app::Pending::File("/tmp/notes.pdf".into()));

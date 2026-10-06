@@ -7768,54 +7768,61 @@ fn pending_strip(app: &mut App, ui: &mut egui::Ui) {
                     crate::app::Pending::Picture {
                         width,
                         height,
-                        rgba,
-                        texture,
+                        preview,
+                        ..
                     } => {
-                        let handle = texture.get_or_insert_with(|| {
-                            // Limit thumbnails to the GPU's maximum texture size.
-                            let image = if *width > 1024 || *height > 1024 {
-                                let scale = 1024.0 / (*width).max(*height) as f32;
-                                let (w, h) = (
-                                    ((*width as f32 * scale) as u32).max(1),
-                                    ((*height as f32 * scale) as u32).max(1),
-                                );
-                                match image::RgbaImage::from_raw(
-                                    *width as u32,
-                                    *height as u32,
-                                    rgba.to_vec(),
-                                ) {
-                                    Some(full) => {
-                                        let small = image::imageops::resize(
-                                            &full,
-                                            w,
-                                            h,
-                                            image::imageops::FilterType::Triangle,
-                                        );
-                                        egui::ColorImage::from_rgba_unmultiplied(
-                                            [w as usize, h as usize],
-                                            &small,
-                                        )
-                                    }
-                                    None => egui::ColorImage::example(),
+                        use crate::app::Preview;
+                        // The thumbnail made on its thread becomes a texture
+                        // once it arrives.
+                        if let Preview::Making(made) = preview {
+                            match made.try_recv() {
+                                Ok(image) => {
+                                    *preview = Preview::Ready(ui.ctx().load_texture(
+                                        format!("pending-picture-{index}"),
+                                        image,
+                                        egui::TextureOptions::LINEAR,
+                                    ));
                                 }
-                            } else {
-                                egui::ColorImage::from_rgba_unmultiplied([*width, *height], rgba)
-                            };
-                            ui.ctx().load_texture(
-                                format!("pending-picture-{index}"),
-                                image,
-                                egui::TextureOptions::LINEAR,
-                            )
-                        });
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                    *preview = Preview::Failed;
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                            }
+                        }
                         // Preserve aspect ratio while filling the tile.
                         let side = tile - 8.0;
                         let scale =
                             (side / (*width).max(1) as f32).min(side / (*height).max(1) as f32);
                         let fitted = vec2(*width as f32 * scale, *height as f32 * scale);
                         let inner = Rect::from_center_size(rect.center(), fitted);
-                        egui::Image::from_texture((handle.id(), fitted))
-                            .corner_radius(6.0)
-                            .paint_at(ui, inner);
+                        match preview {
+                            Preview::Ready(handle) => {
+                                egui::Image::from_texture((handle.id(), fitted))
+                                    .corner_radius(6.0)
+                                    .paint_at(ui, inner);
+                            }
+                            // The picture's own shape at once, with a spinner
+                            // while its thumbnail is made.
+                            Preview::Making(_) | Preview::Failed => {
+                                ui.painter().rect_filled(
+                                    inner,
+                                    CornerRadius::same(6),
+                                    palette.surface_active,
+                                );
+                                if matches!(preview, Preview::Making(_)) {
+                                    egui::Spinner::new()
+                                        .size(18.0)
+                                        .color(palette.secondary)
+                                        .paint_at(
+                                            ui,
+                                            Rect::from_center_size(
+                                                rect.center(),
+                                                Vec2::splat(18.0),
+                                            ),
+                                        );
+                                }
+                            }
+                        }
                     }
                     crate::app::Pending::File(path) => {
                         if crate::app::Pending::is_picture_file(path) {

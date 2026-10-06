@@ -679,14 +679,60 @@ impl JumpHighlight {
 
 /// Attachment pending in the composer.
 pub enum Pending {
-    /// Clipboard image as straight-alpha RGBA and optional preview.
+    /// Clipboard image as straight-alpha RGBA and its thumbnail. Made with
+    /// [`Pending::picture`], which starts the thumbnail.
     Picture {
         width: usize,
         height: usize,
         rgba: std::sync::Arc<Vec<u8>>,
-        texture: Option<egui::TextureHandle>,
+        preview: Preview,
     },
     File(PathBuf),
+}
+
+/// A pasted picture's thumbnail: shrunk on a thread of its own, since a
+/// screenshot takes a moment the frame cannot spare, then a texture.
+pub enum Preview {
+    /// Being shrunk; the tile shows a placeholder meanwhile.
+    Making(std::sync::mpsc::Receiver<egui::ColorImage>),
+    Ready(egui::TextureHandle),
+    /// The pixels did not make a picture; the placeholder stays.
+    Failed,
+}
+
+/// The longest side of a pasted picture's thumbnail, in pixels: a pending
+/// tile is 72 points, so this stays sharp at three times that.
+pub const PREVIEW_SIDE: usize = 256;
+
+/// Shrinks a picture to [`PREVIEW_SIDE`] at most, keeping its shape.
+pub fn picture_preview(width: usize, height: usize, rgba: &[u8]) -> Option<egui::ColorImage> {
+    let longest = width.max(height);
+    if longest == 0 || rgba.len() != width * height * 4 {
+        return None;
+    }
+    if longest <= PREVIEW_SIDE {
+        return Some(egui::ColorImage::from_rgba_unmultiplied(
+            [width, height],
+            rgba,
+        ));
+    }
+    let scale = PREVIEW_SIDE as f32 / longest as f32;
+    let size = |side: usize| ((side as f32 * scale).round() as u32).max(1);
+    let full = image::RgbaImage::from_raw(
+        u32::try_from(width).ok()?,
+        u32::try_from(height).ok()?,
+        rgba.to_vec(),
+    )?;
+    let small = image::imageops::resize(
+        &full,
+        size(width),
+        size(height),
+        image::imageops::FilterType::Triangle,
+    );
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        [small.width() as usize, small.height() as usize],
+        &small,
+    ))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -696,6 +742,36 @@ pub(crate) struct ComposerMention {
 }
 
 impl Pending {
+    /// A pasted picture, staged at once; its thumbnail is made on a thread
+    /// that calls `wake` when it is done.
+    pub fn picture(
+        width: usize,
+        height: usize,
+        rgba: std::sync::Arc<Vec<u8>>,
+        wake: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        let (made, receiver) = std::sync::mpsc::channel();
+        let pixels = std::sync::Arc::clone(&rgba);
+        let started = std::thread::Builder::new()
+            .name("picture-preview".into())
+            .spawn(move || {
+                if let Some(preview) = picture_preview(width, height, &pixels) {
+                    let _ = made.send(preview);
+                }
+                wake();
+            });
+        Self::Picture {
+            width,
+            height,
+            rgba,
+            preview: if started.is_ok() {
+                Preview::Making(receiver)
+            } else {
+                Preview::Failed
+            },
+        }
+    }
+
     /// Whether the composer can preview the file as an image.
     pub fn is_picture_file(path: &std::path::Path) -> bool {
         mime_guess2::from_path(path)
@@ -3349,12 +3425,13 @@ impl App {
                 caption,
             } => {
                 if open {
-                    self.pending.push(Pending::Picture {
-                        width: width as usize,
-                        height: height as usize,
-                        rgba: std::sync::Arc::new(rgba),
-                        texture: None,
-                    });
+                    let waker = self.waker.clone();
+                    self.pending.push(Pending::picture(
+                        width as usize,
+                        height as usize,
+                        std::sync::Arc::new(rgba),
+                        move || waker.wake(),
+                    ));
                 }
                 self.restore_text(&chat, caption.unwrap_or_default());
             }
@@ -5161,12 +5238,13 @@ impl App {
             } => {
                 // Stage the files so the user can add a caption.
                 if self.open_chat.is_some() {
-                    self.pending.push(Pending::Picture {
+                    let waker = self.waker.clone();
+                    self.pending.push(Pending::picture(
                         width,
                         height,
-                        rgba: std::sync::Arc::new(rgba),
-                        texture: None,
-                    });
+                        std::sync::Arc::new(rgba),
+                        move || waker.wake(),
+                    ));
                     self.focus_composer = true;
                 }
             }
@@ -7717,6 +7795,51 @@ mod tests {
         listed.push("\r");
         let contents = clipboard_contents(|| Some(vec![PathBuf::from(listed)]), || None);
         assert!(matches!(contents, Some(ClipboardPaste::Files(paths)) if paths == [file]));
+    }
+
+    /// A pasted picture's thumbnail keeps its shape at no more than
+    /// `PREVIEW_SIDE`, and pixels that do not fit the size make none.
+    #[test]
+    fn a_picture_preview_keeps_its_shape_within_its_side() {
+        let screenshot = vec![200; 3840 * 2160 * 4];
+        let preview = picture_preview(3840, 2160, &screenshot).expect("a preview");
+        assert_eq!(preview.size, [PREVIEW_SIDE, 144]);
+        let tall = picture_preview(100, 1000, &vec![0; 100 * 1000 * 4]).expect("a preview");
+        assert_eq!(tall.size, [26, PREVIEW_SIDE]);
+        let small = picture_preview(2, 3, &[7; 2 * 3 * 4]).expect("a preview");
+        assert_eq!(small.size, [2, 3], "a small picture is kept as it is");
+        assert!(picture_preview(4, 4, &[0; 3]).is_none());
+        assert!(picture_preview(0, 0, &[]).is_none());
+    }
+
+    /// A pasted picture is staged at once, its thumbnail still being made on
+    /// its own thread, which wakes the window with it.
+    #[test]
+    fn a_pasted_picture_is_staged_before_its_thumbnail() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.open_chat = Some("1@s.whatsapp.net".into());
+        app.apply(
+            Action::PasteImage {
+                width: 3840,
+                height: 2160,
+                rgba: vec![90; 3840 * 2160 * 4],
+            },
+            &ctx,
+        );
+        let [
+            Pending::Picture {
+                preview: Preview::Making(made),
+                ..
+            },
+        ] = app.pending.as_slice()
+        else {
+            panic!("the picture is staged with its thumbnail on the way");
+        };
+        let thumbnail = made
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the thumbnail arrives");
+        assert_eq!(thumbnail.size, [PREVIEW_SIDE, 144]);
     }
 
     #[test]
@@ -10436,12 +10559,12 @@ mod tests {
         let chat = "fixture@s.whatsapp.net";
         app.open_chat = Some(chat.into());
         app.reply_to = Some("original".into());
-        app.pending.push(Pending::Picture {
-            width: 1,
-            height: 1,
-            rgba: std::sync::Arc::new(vec![1, 2, 3, 4]),
-            texture: None,
-        });
+        app.pending.push(Pending::picture(
+            1,
+            1,
+            std::sync::Arc::new(vec![1, 2, 3, 4]),
+            || {},
+        ));
         app.pending.push(Pending::File("/fixture/a.pdf".into()));
         app.apply(
             Action::SendPending {
