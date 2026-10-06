@@ -303,9 +303,21 @@ pub(crate) struct Sweep {
     base: Vec<String>,
 }
 
+/// Whether a message can join a selection, matching `Worker::forward_job`.
+pub(crate) fn can_select(content: &Content) -> bool {
+    !matches!(
+        content,
+        Content::Revoked
+            | Content::PhoneOnly { .. }
+            | Content::Unsupported { .. }
+            | Content::Poll { .. }
+            | Content::Interactive { .. }
+    )
+}
+
 /// Adds the messages from `anchor` to `to` to a selection, in either
-/// direction, keeping the chat's order. Deleted and placeholder messages
-/// cannot be forwarded, so they stay out.
+/// direction, keeping the chat's order and skipping content that cannot
+/// be forwarded.
 fn add_range(messages: &[Message], ids: &mut Vec<String>, anchor: &str, to: &str) {
     let position = |id: &str| messages.iter().position(|message| message.id == id);
     let (Some(from), Some(to)) = (position(anchor), position(to)) else {
@@ -313,11 +325,7 @@ fn add_range(messages: &[Message], ids: &mut Vec<String>, anchor: &str, to: &str
     };
     let (from, to) = (from.min(to), from.max(to));
     for message in &messages[from..=to] {
-        if !matches!(
-            message.content,
-            Content::Revoked | Content::PhoneOnly { .. } | Content::Unsupported { .. }
-        ) && !ids.contains(&message.id)
-        {
+        if can_select(&message.content) && !ids.contains(&message.id) {
             ids.push(message.id.clone());
         }
     }
@@ -587,6 +595,9 @@ pub struct App {
     pub focus_settings_search: bool,
     pub quit_requested: bool,
     pub window_focused: bool,
+    /// A notification went out this frame: highlight the taskbar entry of a
+    /// window that is open but not focused.
+    wants_attention: bool,
     /// Whether ZapFast starts at login, when this installation supports it.
     pub start_with_system: Option<bool>,
     /// Cross-thread window repaint handle.
@@ -1114,6 +1125,7 @@ impl App {
             focus_settings_search: false,
             quit_requested: false,
             window_focused: false,
+            wants_attention: false,
             start_with_system: None,
             waker,
             tray: None,
@@ -1569,6 +1581,7 @@ impl App {
             std::sync::Arc::clone(&self.notification_opens),
             move || waker.wake(),
         );
+        self.wants_attention = true;
     }
 
     /// Announces a message while the app lock is on: "New message" from
@@ -1578,6 +1591,7 @@ impl App {
     /// plays, still silent for groups when group sounds are off. The click
     /// target stays inside ZapFast: it opens the message once unlocked.
     fn notify_while_locked(&mut self, chat_id: &str, is_group: bool, message: &str) {
+        self.wants_attention = true;
         let (title, body) = crate::notify::locked_lines(self.locale);
         let sound = notification_sound(&self.settings, None, is_group, false);
         let waker = self.waker.clone();
@@ -2954,6 +2968,43 @@ impl App {
             }
             Event::AccountRemoved => {}
         }
+        self.prune_selection();
+    }
+
+    fn prune_selection(&mut self) {
+        let Some((chat, ids)) = self.selection.clone() else {
+            return;
+        };
+        let conversation = self.conversations.get(chat.as_str());
+        let selectable = |id: &str| {
+            conversation
+                .and_then(|conversation| conversation.message(id))
+                .is_some_and(|message| can_select(&message.content))
+        };
+        let ids: Vec<String> = ids.into_iter().filter(|id| selectable(id)).collect();
+        let anchor_gone = self
+            .selection_anchor
+            .as_deref()
+            .is_some_and(|id| !selectable(id));
+        let base = self
+            .sweep
+            .as_ref()
+            .filter(|sweep| sweep.chat == chat)
+            .map(|sweep| {
+                sweep
+                    .base
+                    .iter()
+                    .filter(|id| selectable(id))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            });
+        if anchor_gone {
+            self.selection_anchor = ids.last().cloned();
+        }
+        if let (Some(base), Some(sweep)) = (base, self.sweep.as_mut()) {
+            sweep.base = base;
+        }
+        self.selection = Some((chat, ids));
     }
 
     fn handle_link(&mut self, status: LinkStatus, live: bool) {
@@ -4561,8 +4612,26 @@ impl App {
                 self.forward_search.clear();
                 self.selection = None;
             }
+            Action::StartSelection => {
+                // Choosing it again keeps what is already ticked.
+                if let Some(chat) = self.open_chat.clone()
+                    && self
+                        .selection
+                        .as_ref()
+                        .is_none_or(|(selected, _)| *selected != chat)
+                {
+                    self.selection = Some((chat, Vec::new()));
+                    self.selection_anchor = None;
+                }
+            }
             Action::SelectMessage(id) => {
-                if let Some(chat) = self.open_chat.clone() {
+                if let Some(chat) = self.open_chat.clone()
+                    && self
+                        .conversations
+                        .get(&chat)
+                        .and_then(|conversation| conversation.message(&id))
+                        .is_some_and(|message| can_select(&message.content))
+                {
                     self.selection = Some((chat, vec![id.clone()]));
                     self.selection_anchor = Some(id);
                 }
@@ -4623,14 +4692,28 @@ impl App {
                 let Some(ids) = range else {
                     return;
                 };
-                self.selection = (!ids.is_empty()).then_some((chat, ids));
+                // An open selection stays open, as its check boxes do, even
+                // with nothing in it.
+                let open = self
+                    .selection
+                    .as_ref()
+                    .is_some_and(|(selected, _)| *selected == chat);
+                self.selection = (open || !ids.is_empty()).then_some((chat, ids));
                 self.selection_anchor = Some(to);
             }
             Action::EndSweep => self.sweep = None,
             Action::ToggleSelected(id) => {
-                self.selection_anchor = Some(id.clone());
                 let mut next = self.selection.clone();
                 if let Some((chat, ids)) = next.as_mut() {
+                    let selectable = self
+                        .conversations
+                        .get(chat.as_str())
+                        .and_then(|conversation| conversation.message(&id))
+                        .is_some_and(|message| can_select(&message.content));
+                    if !selectable {
+                        return;
+                    }
+                    self.selection_anchor = Some(id.clone());
                     if let Some(index) = ids.iter().position(|selected| *selected == id) {
                         ids.remove(index);
                     } else {
@@ -4648,13 +4731,6 @@ impl App {
                     }
                 }
                 self.selection = next;
-                if self
-                    .selection
-                    .as_ref()
-                    .is_some_and(|(_, ids)| ids.is_empty())
-                {
-                    self.selection = None;
-                }
             }
             Action::CancelSelection => {
                 self.selection = None;
@@ -4697,9 +4773,12 @@ impl App {
                 {
                     message.content = Content::Revoked;
                 }
+                self.prune_selection();
                 self.backend.send(Command::Revoke { chat, id });
             }
             Action::DeleteForMe { chat, id } => {
+                // The message stays until WhatsApp accepts the deletion.
+                // `Event::MessageDeleted` removes it and prunes the selection.
                 self.backend.send(Command::DeleteLocal { chat, id });
             }
             Action::Attach => {
@@ -5925,6 +6004,26 @@ impl App {
         self.hold_media();
         self.follow_receipts();
         self.sync_badge();
+        self.request_attention(ctx);
+    }
+
+    /// Highlights the taskbar entry for a message that notified while the
+    /// window is open behind others, as KDE Plasma's task manager shows for
+    /// chat apps. The desktop clears it once the window is focused. Linux
+    /// only: elsewhere it would bounce the Dock or flash the taskbar. Asks the
+    /// viewport too, since `window_focused` stays false behind the app lock
+    /// even while the lock screen has the focus.
+    fn request_attention(&mut self, ctx: &egui::Context) {
+        if std::mem::take(&mut self.wants_attention)
+            && cfg!(target_os = "linux")
+            && !self.window_hidden
+            && !self.window_focused
+            && ctx.input(|input| input.viewport().focused) != Some(true)
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
     }
 
     /// Collects a finished password check, and locks once ZapFast has gone
@@ -8655,10 +8754,162 @@ mod tests {
             Some(vec!["second".into(), "third".into(), "fifth".into()])
         );
         app.apply(Action::CancelSelection, &ctx);
-        // Unselecting the last message leaves selection mode.
+        // Unselecting the last message keeps selecting, as WhatsApp Web
+        // does, and the chat menu opens a selection with nothing in it.
         app.apply(Action::SelectMessage("second".into()), &ctx);
         app.apply(Action::ToggleSelected("second".into()), &ctx);
-        assert!(app.selection.is_none());
+        assert_eq!(app.selection, Some((chat.into(), Vec::new())));
+        app.apply(Action::CancelSelection, &ctx);
+        app.apply(Action::StartSelection, &ctx);
+        assert_eq!(app.selection, Some((chat.into(), Vec::new())));
+        app.apply(Action::ToggleSelected("fifth".into()), &ctx);
+        assert_eq!(app.selection, Some((chat.into(), vec!["fifth".into()])));
+        // Choosing it again keeps what is ticked, and a deleted message
+        // cannot be ticked.
+        app.apply(Action::StartSelection, &ctx);
+        app.apply(Action::ToggleSelected("gone".into()), &ctx);
+        assert_eq!(app.selection, Some((chat.into(), vec!["fifth".into()])));
+    }
+
+    #[test]
+    fn selection_drops_messages_that_become_ineligible() {
+        let mut app = app();
+        let (backend, events) = Backend::detached();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        let chat = "1@s.whatsapp.net";
+        app.open_chat = Some(chat.into());
+        app.conversations.entry(chat.into()).or_default().merge(
+            vec![message(chat, "first", 1), message(chat, "second", 2)],
+            false,
+        );
+        app.apply(Action::SelectMessage("first".into()), &ctx);
+        app.apply(
+            Action::SweepMessages {
+                anchor: "first".into(),
+                to: "second".into(),
+            },
+            &ctx,
+        );
+        let mut revoked = message(chat, "first", 1);
+        revoked.content = Content::Revoked;
+        events
+            .send(Event::MessageUpdated(Box::new(revoked)))
+            .unwrap();
+        app.handle_events();
+        assert_eq!(app.selection, Some((chat.into(), vec!["second".into()])));
+        assert_eq!(app.selection_anchor.as_deref(), Some("second"));
+        assert!(app.sweep.as_ref().unwrap().base.is_empty());
+        app.apply(
+            Action::SweepMessages {
+                anchor: "first".into(),
+                to: "second".into(),
+            },
+            &ctx,
+        );
+        assert_eq!(app.selection, Some((chat.into(), vec!["second".into()])));
+
+        app.apply(
+            Action::DeleteForEveryone {
+                chat: chat.into(),
+                id: "second".into(),
+            },
+            &ctx,
+        );
+        assert_eq!(app.selection, Some((chat.into(), Vec::new())));
+
+        // Delete for me keeps the row until the deletion is accepted, then
+        // drops it from the selection along with the message.
+        app.conversations
+            .get_mut(chat)
+            .unwrap()
+            .merge(vec![message(chat, "kept", 3)], false);
+        app.apply(Action::SelectMessage("kept".into()), &ctx);
+        events
+            .send(Event::MessageDeleted {
+                chat: chat.to_owned(),
+                id: "kept".into(),
+            })
+            .unwrap();
+        app.handle_events();
+        assert_eq!(app.selection, Some((chat.into(), Vec::new())));
+        assert!(app.conversations[chat].message("kept").is_none());
+    }
+
+    #[test]
+    fn selection_rejects_messages_that_cannot_be_forwarded() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let chat = "1@s.whatsapp.net";
+        app.open_chat = Some(chat.into());
+        let blocked = [
+            Content::Revoked,
+            Content::PhoneOnly {
+                view_once: true,
+                live_location: false,
+                once: None,
+            },
+            Content::Unsupported {
+                what: "Test".into(),
+            },
+            Content::Poll {
+                question: "Lunch?".into(),
+                options: vec!["Yes".into(), "No".into()],
+                state: Default::default(),
+            },
+            Content::Interactive {
+                text: "Choose an option".into(),
+                card: None,
+            },
+        ];
+        let mut messages = vec![message(chat, "first", 1)];
+        for (index, content) in blocked.into_iter().enumerate() {
+            let mut row = message(chat, &format!("blocked-{index}"), index as i64 + 2);
+            row.content = content;
+            messages.push(row);
+        }
+        messages.push(message(chat, "last", 10));
+        app.conversations
+            .entry(chat.into())
+            .or_default()
+            .merge(messages, false);
+        for id in (0..5)
+            .map(|index| format!("blocked-{index}"))
+            .chain(std::iter::once("missing".into()))
+        {
+            app.apply(Action::SelectMessage(id.clone()), &ctx);
+            assert!(app.selection.is_none(), "{id} cannot start a selection");
+            assert!(app.selection_anchor.is_none());
+            app.apply(Action::SelectMessage("first".into()), &ctx);
+            app.apply(Action::SelectMessage(id.clone()), &ctx);
+            app.apply(Action::ToggleSelected(id.clone()), &ctx);
+            assert_eq!(
+                app.selection,
+                Some((chat.into(), vec!["first".into()])),
+                "{id} cannot replace or join a selection"
+            );
+            assert_eq!(app.selection_anchor.as_deref(), Some("first"));
+            app.apply(Action::CancelSelection, &ctx);
+            app.selection_anchor = None;
+        }
+        app.apply(Action::SelectMessage("first".into()), &ctx);
+        app.apply(Action::SelectRange("last".into()), &ctx);
+        assert_eq!(
+            app.selection,
+            Some((chat.into(), vec!["first".into(), "last".into()]))
+        );
+        app.apply(Action::CancelSelection, &ctx);
+        app.apply(
+            Action::SweepMessages {
+                anchor: "first".into(),
+                to: "last".into(),
+            },
+            &ctx,
+        );
+        assert_eq!(
+            app.selection,
+            Some((chat.into(), vec!["first".into(), "last".into()]))
+        );
     }
 
     /// #246: a sweep adds its range to what was selected when it began, in
@@ -12064,6 +12315,78 @@ mod app_lock_tests {
         assert_eq!(app.open_chat, None, "not while locked");
         try_password(&mut app, &ctx, PASSWORD);
         assert_eq!(app.open_chat.as_deref(), Some(CHAT), "opened once unlocked");
+    }
+
+    fn attention_requested(ctx: &egui::Context) -> bool {
+        ctx.viewport(|viewport| {
+            viewport
+                .commands
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::RequestUserAttention(_)))
+        })
+    }
+
+    /// A notification highlights the taskbar entry of an open, unfocused
+    /// window, once; a hidden window has no entry to highlight.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_notification_highlights_an_unfocused_window_in_the_taskbar() {
+        let ctx = egui::Context::default();
+        let mut app = unlocked_app();
+        let message = incoming(&mut app);
+        app.window_hidden = false;
+        app.window_focused = false;
+        app.maybe_notify(CHAT, &message);
+        app.request_attention(&ctx);
+        assert!(attention_requested(&ctx));
+
+        let ctx = egui::Context::default();
+        app.request_attention(&ctx);
+        assert!(!attention_requested(&ctx), "only once per notification");
+
+        app.window_hidden = true;
+        app.maybe_notify(CHAT, &message);
+        app.request_attention(&ctx);
+        assert!(!attention_requested(&ctx));
+    }
+
+    /// Behind the app lock `window_focused` stays false, but a lock screen
+    /// that has the focus is no window to point at.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_focused_lock_screen_is_not_highlighted() {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input.viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                focused: Some(true),
+                ..Default::default()
+            },
+        );
+        ctx.run_ui(input, |_| {}).textures_delta.clear();
+        let mut app = unlocked_app();
+        let message = incoming(&mut app);
+        app.window_hidden = false;
+        app.lock_app();
+        assert!(!app.window_focused);
+        app.maybe_notify(CHAT, &message);
+        app.request_attention(&ctx);
+        assert!(!attention_requested(&ctx));
+    }
+
+    #[test]
+    fn reading_the_chat_asks_for_no_attention() {
+        let ctx = egui::Context::default();
+        let mut app = unlocked_app();
+        let message = incoming(&mut app);
+        app.window_hidden = false;
+        app.window_focused = true;
+        app.page = Page::Chats;
+        app.open_chat = Some(CHAT.into());
+        app.maybe_notify(CHAT, &message);
+        app.request_attention(&ctx);
+        assert!(!attention_requested(&ctx));
     }
 
     #[test]

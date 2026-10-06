@@ -51,6 +51,26 @@ Availability depends on what the phone sends; messages deleted for you stay
 deleted. This action does not require unlinking your account or clearing the
 archive.
 
+## Selecting messages
+
+Choose **Select messages** in the chat's menu (the three dots at the top),
+**Select** in a message's menu, or Ctrl-click (Command-click on macOS) a
+message. As in WhatsApp Web, every message then gets a check box on the left.
+Click anywhere on a message's row, its box included, to add or remove it.
+Shift-click adds every message up to the one you click, and a drag adds every
+message it passes, scrolling when you hold the pointer at the top or bottom
+edge. A drag that starts beside the bubbles, off the text, starts a selection
+too. A drag over the text outside a selection still selects the text to copy.
+**Forward…** sends the selected messages together, in their original
+order. Unticking the last message keeps the selection open; Escape or the
+close button ends it. A batch goes out one message at a time, each starting
+once the one before it reached WhatsApp, so a picture cannot overtake the
+text that came before it. Deleted or unsupported messages, phone-only content,
+polls, and interactive messages cannot be selected or forwarded, so they have
+no box. If a selected message is deleted, it leaves the selection automatically.
+Keyboard focus outlines the box; screen readers identify its message
+by sender, time, and a short summary.
+
 ## Stickers
 
 The sticker tab works like WhatsApp's: a row of tabs holds **Recent**
@@ -351,7 +371,9 @@ taskbar button while the window is open, using `99+` above 99. Windows must use
 its regular taskbar icon size for overlays to appear. The count
 does not count toasts remaining in Windows notification history. On Linux and
 Windows, notifications show the chat picture and open the chat at the message
-they announced when clicked. Muted chats do not send notifications, and
+they announced when clicked. On Linux, a notification that arrives while the
+window is open behind others also highlights ZapFast in the taskbar until you
+switch to it. Muted chats do not send notifications, and
 archived chats stay quiet while they remain archived. You can change both settings.
 
 Press `Ctrl+/` or click the keyboard button under the composer to list all

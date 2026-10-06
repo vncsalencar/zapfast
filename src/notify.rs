@@ -291,6 +291,19 @@ pub fn lines(chat_name: &str, is_group: bool, sender: &str, summary: &str) -> (S
     (chat_name.to_owned(), body)
 }
 
+/// What a Linux notification asks of the desktop's sound. The system sound is
+/// named, because notification servers such as Plasma's play nothing for an
+/// application without its own notification configuration. ZapFast's own sounds
+/// and silence keep the desktop quiet.
+#[cfg(target_os = "linux")]
+fn sound_hint(system_sound: bool) -> notify_rust::Hint {
+    if system_sound {
+        notify_rust::Hint::SoundName("message-new-instant".into())
+    } else {
+        notify_rust::Hint::SuppressSound(true)
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[expect(clippy::too_many_arguments)]
 fn deliver(
@@ -309,13 +322,17 @@ fn deliver(
     let mut notification = notify_rust::Notification::new();
     notification
         .appname("ZapFast")
+        // Ties the notification to the installed application, so desktops
+        // list ZapFast in their notification settings and group by it.
+        .hint(notify_rust::Hint::DesktopEntry(badge::desktop_file()))
         .summary(title)
         .body(body)
+        // The freedesktop category for a received instant message, which
+        // notification servers can sort, filter, or style by.
+        .hint(notify_rust::Hint::Category("im.received".into()))
         .icon("zapfast")
         .action("default", "Open");
-    if !system_sound {
-        notification.hint(notify_rust::Hint::SuppressSound(true));
-    }
+    notification.hint(sound_hint(system_sound));
     if let Some(picture) = picture {
         notification.image_path(&picture.to_string_lossy());
     }
@@ -430,6 +447,16 @@ mod tests {
         assert!(plist.contains(&format!(
             "<key>CFBundleIdentifier</key><string>{MACOS_APPLICATION_ID}</string>"
         )));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_system_sound_names_the_theme_message_sound() {
+        assert_eq!(
+            sound_hint(true),
+            notify_rust::Hint::SoundName("message-new-instant".into())
+        );
+        assert_eq!(sound_hint(false), notify_rust::Hint::SuppressSound(true));
     }
 
     #[test]
