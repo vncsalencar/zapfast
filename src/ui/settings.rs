@@ -332,14 +332,18 @@ fn sections(app: &App) -> Vec<Section> {
         Text::default()
     };
     appearance.row(translated(locale, "Theme"), detail, theme_picker);
-    appearance.row(
-        translated(locale, "Font"),
+    let font_detail = if theme::custom_font().is_some_and(|font| font.single_weight) {
+        translated(
+            locale,
+            "Only one weight of this font was found beside it, so bold text looks regular.",
+        )
+    } else {
         translated(
             locale,
             "System is your desktop's interface font. Inter looks the same on every computer.",
-        ),
-        font_picker,
-    );
+        )
+    };
+    appearance.row(translated(locale, "Font"), font_detail, font_picker);
     appearance.row(
         translated(locale, "Wallpaper"),
         Text::default(),
@@ -1071,14 +1075,18 @@ fn font_picker(ui: &mut egui::Ui, app: &mut App) {
     use crate::settings::FontChoice;
     let palette = app.palette;
     let selected = app.settings.font.clone();
-    // "Inter" is a name; "System" is a word; a custom font shows its file.
+    // "Inter" is a name; "System" is a word; a custom font shows its family,
+    // or its file while the family could not be read.
+    let family = theme::custom_font().map(|font| font.family);
     let label = |choice: &FontChoice| match choice {
         FontChoice::System => crate::i18n::gettext(app.locale, choice.label()).into_owned(),
         FontChoice::Inter => choice.label().to_owned(),
-        FontChoice::Custom(path) => path.file_name().map_or_else(
-            || choice.label().to_owned(),
-            |name| name.to_string_lossy().into_owned(),
-        ),
+        FontChoice::Custom(path) => family.clone().unwrap_or_else(|| {
+            path.file_name().map_or_else(
+                || choice.label().to_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            )
+        }),
     };
     let response = egui::ComboBox::from_id_salt("interface_font")
         .selected_text(label(&selected))
