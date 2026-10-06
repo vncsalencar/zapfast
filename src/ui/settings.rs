@@ -361,6 +361,17 @@ fn sections(app: &App) -> Vec<Section> {
         ),
         chat_font_picker,
     );
+    // Only a font of the chat's own makes a difference to the chat list.
+    if app.settings.chat_font.is_some() {
+        appearance.toggle(
+            translated(locale, "Chat font in the chat list"),
+            translated(
+                locale,
+                "Message previews use the chat font. Names keep the interface font.",
+            ),
+            |settings| &mut settings.chat_font_in_previews,
+        );
+    }
     appearance.row(
         translated(locale, "Wallpaper"),
         Text::default(),

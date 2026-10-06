@@ -78,6 +78,35 @@ pub fn line(
     }
 }
 
+/// Wrapped text like [`line()`] with `prefix` before it in a font of its own,
+/// as a sender's name before a message drawn in the chat's font.
+pub fn line_with_prefix(
+    ui: &Ui,
+    prefix: (&str, egui::FontId),
+    text: &str,
+    font: egui::FontId,
+    color: Color32,
+    width: f32,
+    max_rows: usize,
+) -> Line {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = width;
+    job.wrap.max_rows = max_rows;
+    job.wrap.overflow_character = Some('…');
+    let mut placements = Vec::new();
+    let (prefix, prefix_font) = prefix;
+    let prefix_format = egui::TextFormat::simple(prefix_font, color);
+    emoji::append(ui, &mut job, &mut placements, prefix, &prefix_format);
+    let format = egui::TextFormat::simple(font, color);
+    emoji::append(ui, &mut job, &mut placements, text, &format);
+    let galley = bidi::layout_job(ui, job);
+    Line {
+        galley,
+        placements,
+        accessible_text: format!("{prefix}{text}"),
+    }
+}
+
 /// One line of text holding right-to-left script, cut to `width` by its
 /// logical end. egui cuts a line in the order it lays glyphs out, which for
 /// Arabic and Hebrew is already the visual one, so its ellipsis replaced a

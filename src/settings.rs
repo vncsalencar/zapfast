@@ -409,6 +409,9 @@ pub struct Settings {
     /// The typeface of messages and the message box. `None` follows
     /// [`Settings::font`].
     pub chat_font: Option<FontChoice>,
+    /// Whether the chat list's message previews draw in the chat's font.
+    /// Names and labels around them keep the interface's.
+    pub chat_font_in_previews: bool,
     /// Custom fonts used before, newest first, so the font pickers keep
     /// offering them after another font is chosen.
     pub recent_fonts: Vec<RecentFont>,
@@ -537,6 +540,7 @@ impl Default for Settings {
             theme: ThemeChoice::Dark,
             font: FontChoice::System,
             chat_font: None,
+            chat_font_in_previews: false,
             recent_fonts: Vec::new(),
             interface_language: None,
             custom_theme: None,
