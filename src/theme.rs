@@ -509,25 +509,80 @@ fn chosen_font() -> std::sync::MutexGuard<'static, ChosenFont> {
 
 /// Chooses the interface's typeface and installs it. Call it before
 /// [`install`] with the saved choice, and again when the choice changes.
-/// A custom file that cannot be read or is not a font is refused, and the
-/// typeface stays as it was.
-pub fn set_font(ctx: &egui::Context, font: &crate::settings::FontChoice) -> Result<(), String> {
-    if chosen_font().choice == *font {
-        return Ok(());
+/// A custom font is read by a [`FontLoad`] first and arrives with its
+/// family; one without it is left for the load to bring.
+pub fn set_font(
+    ctx: &egui::Context,
+    font: &crate::settings::FontChoice,
+    custom: Option<LoadedFont>,
+) {
+    let custom = custom.map(|loaded| loaded.0);
+    if matches!(font, crate::settings::FontChoice::Custom(_)) && custom.is_none() {
+        return;
     }
-    let custom = match font {
-        crate::settings::FontChoice::Custom(path) => {
-            Some(std::sync::Arc::new(custom_font::Family::load(path)?))
-        }
-        _ => None,
-    };
+    if chosen_font().choice == *font && custom.is_none() {
+        return;
+    }
     *chosen_font() = ChosenFont {
         choice: font.clone(),
         custom: custom.clone(),
     };
     // Installs what was just chosen, not what the global holds by now.
     install_chosen_fonts(ctx, primary_font_for(font), custom.as_deref());
-    Ok(())
+}
+
+/// Whether `font` is the typeface installed now, with its family read.
+pub fn font_installed(font: &crate::settings::FontChoice) -> bool {
+    let chosen = chosen_font();
+    chosen.choice == *font
+        && (chosen.custom.is_some() || !matches!(font, crate::settings::FontChoice::Custom(_)))
+}
+
+/// A custom family read and checked, ready for [`set_font`].
+pub struct LoadedFont(std::sync::Arc<custom_font::Family>);
+
+/// A custom font family being read on a thread of its own: a family in a
+/// folder of large files takes a moment, which a frame cannot spare.
+pub struct FontLoad {
+    /// The choice being read, applied once the family arrives.
+    pub choice: crate::settings::FontChoice,
+    receiver: std::sync::mpsc::Receiver<Result<LoadedFont, String>>,
+}
+
+impl FontLoad {
+    /// Starts reading `choice`'s family, calling `wake` when it is done.
+    /// Built-in choices need no reading and start nothing.
+    pub fn start(
+        choice: crate::settings::FontChoice,
+        wake: impl FnOnce() + Send + 'static,
+    ) -> Option<Self> {
+        let crate::settings::FontChoice::Custom(path) = &choice else {
+            return None;
+        };
+        let path = path.clone();
+        let (loaded, receiver) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("font-load".into())
+            .spawn(move || {
+                let family = custom_font::Family::load(&path)
+                    .map(|family| LoadedFont(std::sync::Arc::new(family)));
+                let _ = loaded.send(family);
+                wake();
+            })
+            .ok()?;
+        Some(Self { choice, receiver })
+    }
+
+    /// The family once read, or why it could not be; `None` while reading.
+    pub fn poll(&self) -> Option<Result<LoadedFont, String>> {
+        match self.receiver.try_recv() {
+            Ok(result) => Some(result),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err("the font could not be read".to_owned()))
+            }
+        }
+    }
 }
 
 /// What Settings says about the custom family on screen.
