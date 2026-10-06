@@ -1663,8 +1663,11 @@ pub enum Action {
     /// Draws the interface in the platform's font, the bundled Inter, or a
     /// font file.
     SetFont(crate::settings::FontChoice),
-    /// Asks for a font file to draw the interface with.
-    PickFont,
+    /// Draws messages and the message box in their own font; `None` follows
+    /// the interface's.
+    SetChatFont(Option<crate::settings::FontChoice>),
+    /// Asks for a font file to draw the interface or the chat with.
+    PickFont(crate::theme::FontSlot),
     SetInterfaceLanguage(Option<crate::i18n::Locale>),
     SetCustomTheme(String),
     SetWallpaperColor(crate::settings::WallpaperColor),

@@ -332,18 +332,35 @@ fn sections(app: &App) -> Vec<Section> {
         Text::default()
     };
     appearance.row(translated(locale, "Theme"), detail, theme_picker);
-    let font_detail = if theme::custom_font().is_some_and(|font| font.single_weight) {
-        translated(
-            locale,
-            "Only one weight of this font was found beside it, so bold text looks regular.",
-        )
-    } else {
-        translated(
-            locale,
-            "System is your desktop's interface font. Inter looks the same on every computer.",
-        )
+    let font_detail = |slot: theme::FontSlot, otherwise: Text| {
+        if theme::custom_font(slot).is_some_and(|font| font.single_weight) {
+            translated(
+                locale,
+                "Only one weight of this font was found beside it, so bold text looks regular.",
+            )
+        } else {
+            otherwise
+        }
     };
-    appearance.row(translated(locale, "Font"), font_detail, font_picker);
+    appearance.row(
+        translated(locale, "Font"),
+        font_detail(
+            theme::FontSlot::Interface,
+            translated(
+                locale,
+                "System is your desktop's interface font. Inter looks the same on every computer.",
+            ),
+        ),
+        font_picker,
+    );
+    appearance.row(
+        translated(locale, "Chat font"),
+        font_detail(
+            theme::FontSlot::Chat,
+            translated(locale, "Messages and the message box."),
+        ),
+        chat_font_picker,
+    );
     appearance.row(
         translated(locale, "Wallpaper"),
         Text::default(),
@@ -1070,44 +1087,91 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
 /// The website's page on writing a theme.
 const THEMES_GUIDE: &str = "https://zapfast.rocks/themes/";
 
-/// The interface language menu.
+/// The interface's font menu.
 fn font_picker(ui: &mut egui::Ui, app: &mut App) {
+    font_menu(ui, app, theme::FontSlot::Interface);
+}
+
+/// The font menu of messages and the message box.
+fn chat_font_picker(ui: &mut egui::Ui, app: &mut App) {
+    font_menu(ui, app, theme::FontSlot::Chat);
+}
+
+/// A font menu: for the chat, following the interface first; then the
+/// built-in fonts, the custom fonts used before, and a file to choose.
+fn font_menu(ui: &mut egui::Ui, app: &mut App, slot: theme::FontSlot) {
     use crate::settings::FontChoice;
     let palette = app.palette;
-    let selected = app.settings.font.clone();
-    // "Inter" is a name; "System" is a word; a custom font shows its family,
-    // or its file while the family could not be read.
-    let family = theme::custom_font().map(|font| font.family);
-    let label = |choice: &FontChoice| match choice {
-        FontChoice::System => crate::i18n::gettext(app.locale, choice.label()).into_owned(),
-        FontChoice::Inter => choice.label().to_owned(),
-        FontChoice::Custom(path) => family.clone().unwrap_or_else(|| {
-            path.file_name().map_or_else(
-                || choice.label().to_owned(),
-                |name| name.to_string_lossy().into_owned(),
-            )
-        }),
+    let locale = app.locale;
+    let selected = match slot {
+        theme::FontSlot::Interface => Some(app.settings.font.clone()),
+        theme::FontSlot::Chat => app.settings.chat_font.clone(),
     };
-    let response = egui::ComboBox::from_id_salt("interface_font")
+    let recent = app.settings.recent_fonts.clone();
+    let installed = theme::custom_font(slot).map(|font| font.family);
+    let same = crate::i18n::gettext(locale, "Same as interface").into_owned();
+    // "Inter" is a name; "System" is a word; a custom font shows its family,
+    // or its file before the family has been read.
+    let label = |choice: &Option<FontChoice>| match choice {
+        None => same.clone(),
+        Some(choice @ FontChoice::System) => {
+            crate::i18n::gettext(locale, choice.label()).into_owned()
+        }
+        Some(choice @ FontChoice::Inter) => choice.label().to_owned(),
+        Some(choice @ FontChoice::Custom(path)) => recent
+            .iter()
+            .find(|font| font.path == *path)
+            .map(|font| font.family.clone())
+            .or_else(|| installed.clone())
+            .unwrap_or_else(|| {
+                path.file_name().map_or_else(
+                    || choice.label().to_owned(),
+                    |name| name.to_string_lossy().into_owned(),
+                )
+            }),
+    };
+    let mut options: Vec<Option<FontChoice>> = Vec::new();
+    if slot == theme::FontSlot::Chat {
+        options.push(None);
+    }
+    options.extend(FontChoice::ALL.map(Some));
+    options.extend(
+        recent
+            .iter()
+            .map(|font| Some(FontChoice::Custom(font.path.clone()))),
+    );
+    // A saved font not yet read, as when its file went missing.
+    if let Some(FontChoice::Custom(path)) = &selected
+        && !recent.iter().any(|font| font.path == *path)
+    {
+        options.push(selected.clone());
+    }
+    let salt = match slot {
+        theme::FontSlot::Interface => "interface_font",
+        theme::FontSlot::Chat => "chat_font",
+    };
+    let response = egui::ComboBox::from_id_salt(salt)
         .selected_text(label(&selected))
         .width(200.0_f32.min(ui.available_width()))
         .show_ui(ui, |ui| {
-            for choice in FontChoice::ALL {
-                if theme_option(ui, &palette, &label(&choice), selected == choice) {
-                    app.actions.push(Action::SetFont(choice));
+            for option in options {
+                if theme_option(ui, &palette, &label(&option), selected == option) {
+                    app.actions.push(match (slot, option) {
+                        (theme::FontSlot::Chat, option) => Action::SetChatFont(option),
+                        (theme::FontSlot::Interface, Some(option)) => Action::SetFont(option),
+                        (theme::FontSlot::Interface, None) => continue,
+                    });
                 }
             }
-            if matches!(selected, FontChoice::Custom(_)) {
-                theme_option(ui, &palette, &label(&selected), true);
-            }
-            let choose = crate::i18n::gettext(app.locale, "Choose a file…");
+            let choose = crate::i18n::gettext(locale, "Choose a file…");
             if theme_option(ui, &palette, &choose, false) {
-                app.actions.push(Action::PickFont);
+                app.actions.push(Action::PickFont(slot));
             }
         });
     theme::reveal_focus(&response.response);
 }
 
+/// The interface language menu.
 fn language_picker(ui: &mut egui::Ui, app: &mut App) {
     let palette = app.palette;
     let selected = app.settings.interface_language;

@@ -490,60 +490,115 @@ pub fn apply(ctx: &egui::Context, palette: &Palette) {
     ctx.set_global_style(style);
 }
 
-/// The interface's typeface (Settings, Appearance, Font), with a custom
-/// family once its files have been read and checked.
+/// Which typeface a choice sets: the interface's, or that of messages and
+/// the message box (Settings, Appearance).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontSlot {
+    Interface,
+    Chat,
+}
+
+/// A typeface, with its custom family once the files have been read.
+#[derive(Clone)]
 struct ChosenFont {
     choice: crate::settings::FontChoice,
     custom: Option<std::sync::Arc<custom_font::Family>>,
 }
 
-static FONT: std::sync::Mutex<ChosenFont> = std::sync::Mutex::new(ChosenFont {
-    choice: crate::settings::FontChoice::System,
-    custom: None,
+/// Both typefaces. A chat without its own follows the interface.
+#[derive(Clone)]
+struct ChosenFonts {
+    interface: ChosenFont,
+    chat: Option<ChosenFont>,
+}
+
+static FONTS: std::sync::Mutex<ChosenFonts> = std::sync::Mutex::new(ChosenFonts {
+    interface: ChosenFont {
+        choice: crate::settings::FontChoice::System,
+        custom: None,
+    },
+    chat: None,
 });
 
-fn chosen_font() -> std::sync::MutexGuard<'static, ChosenFont> {
-    FONT.lock()
+fn chosen_fonts() -> std::sync::MutexGuard<'static, ChosenFonts> {
+    FONTS
+        .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Chooses the interface's typeface and installs it. Call it before
-/// [`install`] with the saved choice, and again when the choice changes.
-/// A custom font is read by a [`FontLoad`] first and arrives with its
-/// family; one without it is left for the load to bring.
-pub fn set_font(
-    ctx: &egui::Context,
-    font: &crate::settings::FontChoice,
-    custom: Option<LoadedFont>,
-) {
-    let custom = custom.map(|loaded| loaded.0);
-    if matches!(font, crate::settings::FontChoice::Custom(_)) && custom.is_none() {
-        return;
+impl ChosenFonts {
+    fn slot(&self, slot: FontSlot) -> Option<&ChosenFont> {
+        match slot {
+            FontSlot::Interface => Some(&self.interface),
+            FontSlot::Chat => self.chat.as_ref(),
+        }
     }
-    if chosen_font().choice == *font && custom.is_none() {
-        return;
-    }
-    *chosen_font() = ChosenFont {
-        choice: font.clone(),
-        custom: custom.clone(),
-    };
-    // Installs what was just chosen, not what the global holds by now.
-    install_chosen_fonts(ctx, primary_font_for(font), custom.as_deref());
 }
 
-/// Whether `font` is the typeface installed now, with its family read.
-pub fn font_installed(font: &crate::settings::FontChoice) -> bool {
-    let chosen = chosen_font();
-    chosen.choice == *font
-        && (chosen.custom.is_some() || !matches!(font, crate::settings::FontChoice::Custom(_)))
+/// Chooses a typeface and installs it. Call it before [`install`] with the
+/// saved choices, and again when one changes. The chat's `None` follows the
+/// interface; the interface always has one. A custom font is read by a
+/// [`FontLoad`] first and arrives with its family; one without it is left
+/// for the load to bring.
+pub fn set_font(
+    ctx: &egui::Context,
+    slot: FontSlot,
+    font: Option<&crate::settings::FontChoice>,
+    custom: Option<LoadedFont>,
+) {
+    let wanted = font.map(|font| ChosenFont {
+        choice: font.clone(),
+        custom: custom.map(|loaded| loaded.0),
+    });
+    if wanted.as_ref().is_some_and(|wanted| {
+        matches!(wanted.choice, crate::settings::FontChoice::Custom(_)) && wanted.custom.is_none()
+    }) {
+        return;
+    }
+    // Always installs, even a choice the global already holds: the global is
+    // the process's, and the context asking may not have it yet.
+    let chosen = {
+        let mut chosen = chosen_fonts();
+        match (slot, wanted) {
+            (FontSlot::Interface, Some(wanted)) => chosen.interface = wanted,
+            (FontSlot::Interface, None) => return,
+            (FontSlot::Chat, wanted) => chosen.chat = wanted,
+        }
+        chosen.clone()
+    };
+    // Installs what was just chosen, not what the global holds by now.
+    install_chosen_fonts(ctx, &chosen);
+}
+
+/// Whether `font` is the typeface installed in `slot` now, with its family
+/// read.
+pub fn font_installed(slot: FontSlot, font: Option<&crate::settings::FontChoice>) -> bool {
+    match (chosen_fonts().slot(slot), font) {
+        (None, None) => true,
+        (Some(current), Some(font)) => {
+            current.choice == *font
+                && (current.custom.is_some()
+                    || !matches!(font, crate::settings::FontChoice::Custom(_)))
+        }
+        _ => false,
+    }
 }
 
 /// A custom family read and checked, ready for [`set_font`].
 pub struct LoadedFont(std::sync::Arc<custom_font::Family>);
 
+impl LoadedFont {
+    /// The family's name, for the pickers' list of recent fonts.
+    pub fn family(&self) -> &str {
+        &self.0.name
+    }
+}
+
 /// A custom font family being read on a thread of its own: a family in a
 /// folder of large files takes a moment, which a frame cannot spare.
 pub struct FontLoad {
+    /// The typeface the family is for.
+    pub slot: FontSlot,
     /// The choice being read, applied once the family arrives.
     pub choice: crate::settings::FontChoice,
     receiver: std::sync::mpsc::Receiver<Result<LoadedFont, String>>,
@@ -553,6 +608,7 @@ impl FontLoad {
     /// Starts reading `choice`'s family, calling `wake` when it is done.
     /// Built-in choices need no reading and start nothing.
     pub fn start(
+        slot: FontSlot,
         choice: crate::settings::FontChoice,
         wake: impl FnOnce() + Send + 'static,
     ) -> Option<Self> {
@@ -570,7 +626,11 @@ impl FontLoad {
                 wake();
             })
             .ok()?;
-        Some(Self { choice, receiver })
+        Some(Self {
+            slot,
+            choice,
+            receiver,
+        })
     }
 
     /// The family once read, or why it could not be; `None` while reading.
@@ -585,7 +645,7 @@ impl FontLoad {
     }
 }
 
-/// What Settings says about the custom family on screen.
+/// What Settings says about a custom family on screen.
 pub struct CustomFontSummary {
     /// The family's name, shown in place of the file's.
     pub family: String,
@@ -593,27 +653,26 @@ pub struct CustomFontSummary {
     pub single_weight: bool,
 }
 
-/// The custom family the interface draws with, if one is installed.
-pub fn custom_font() -> Option<CustomFontSummary> {
-    chosen_font()
-        .custom
-        .as_ref()
+/// The custom family `slot` draws with, if one is installed.
+pub fn custom_font(slot: FontSlot) -> Option<CustomFontSummary> {
+    chosen_fonts()
+        .slot(slot)
+        .and_then(|chosen| chosen.custom.as_ref())
         .map(|family| CustomFontSummary {
             family: family.name.clone(),
             single_weight: family.single_weight(),
         })
 }
 
-/// Whether Inter is the chosen typeface.
+/// Whether Inter is the chosen interface typeface.
 #[cfg(test)]
 pub fn inter_chosen() -> bool {
-    chosen_font().choice == crate::settings::FontChoice::Inter
+    chosen_fonts().interface.choice == crate::settings::FontChoice::Inter
 }
 
-/// The typeface the interface is asked to draw with: the setting's, and
-/// always Inter in tests, so layouts do not depend on the machine. A custom
-/// file draws in front of the platform's font, which still covers what the
-/// file lacks.
+/// The face a choice is drawn in: the setting's, and always Inter in tests,
+/// so layouts do not depend on the machine. A custom family draws in front
+/// of the platform's font, which still covers what the family lacks.
 fn primary_font_for(font: &crate::settings::FontChoice) -> fastframe_fonts::Primary {
     if cfg!(test) || *font == crate::settings::FontChoice::Inter {
         fastframe_fonts::Primary::Inter
@@ -622,32 +681,132 @@ fn primary_font_for(font: &crate::settings::FontChoice) -> fastframe_fonts::Prim
     }
 }
 
-/// The chosen interface font at four weights (the platform's, or Inter
-/// where there is none), egui's own fonts behind it, and installed fonts
-/// for the scripts it lacks, hinted as the desktop asks. Inter also draws
-/// the [`tabular`] timers.
-fn install_fonts(ctx: &egui::Context) {
-    let (primary, custom) = {
-        let chosen = chosen_font();
-        (primary_font_for(&chosen.choice), chosen.custom.clone())
-    };
-    install_chosen_fonts(ctx, primary, custom.as_deref());
+/// The egui family that draws messages and the message box at `weight`.
+fn chat_family(weight: fastframe_fonts::Weight) -> egui::FontFamily {
+    egui::FontFamily::Name(format!("zapfast-chat-{}", weight.name()).into())
 }
 
-fn install_chosen_fonts(
-    ctx: &egui::Context,
-    primary: fastframe_fonts::Primary,
-    custom: Option<&custom_font::Family>,
-) {
+/// The font of messages and the message box at `weight` and `size`. Where
+/// the chat families are not installed (tests with their own fonts), the
+/// interface's family of the same weight draws instead.
+pub fn chat_font(ctx: &egui::Context, weight: fastframe_fonts::Weight, size: f32) -> egui::FontId {
+    let family = chat_family(weight);
+    if ctx.fonts(|fonts| fonts.definitions().families.contains_key(&family)) {
+        egui::FontId::new(size, family)
+    } else {
+        weight.font_id(size)
+    }
+}
+
+/// The chosen interface font at four weights (the platform's, or Inter
+/// where there is none), egui's own fonts behind it, and installed fonts
+/// for the scripts it lacks, hinted as the desktop asks; the chat's font in
+/// [`chat_font`]'s families with the same fonts behind it. Inter also draws
+/// the [`tabular`] timers.
+fn install_fonts(ctx: &egui::Context) {
+    let chosen = chosen_fonts().clone();
+    install_chosen_fonts(ctx, &chosen);
+}
+
+fn install_chosen_fonts(ctx: &egui::Context, chosen: &ChosenFonts) {
+    use fastframe_fonts::Weight;
+    let primary = primary_font_for(&chosen.interface.choice);
     let mut fonts = fastframe_fonts::FontSetup::default()
         .primary(primary)
         .definitions();
-    if let Some(custom) = custom {
-        custom.add_to(&mut fonts);
+    // What stands behind each weight's interface face, before a custom
+    // family goes in front of it.
+    let behind: Vec<(Weight, Vec<String>)> = Weight::ALL
+        .into_iter()
+        .map(|weight| {
+            let family = fonts.families.get(&weight.family());
+            (
+                weight,
+                family.map_or_else(Vec::new, |family| family.iter().skip(1).cloned().collect()),
+            )
+        })
+        .collect();
+    if let Some(custom) = &chosen.interface.custom {
+        add_custom(&mut fonts, "zapfast-custom", custom, Weight::family);
     }
+    add_chat(&mut fonts, chosen, primary, &behind);
     add_tabular(&mut fonts);
     text_rendering().apply_to(&mut fonts);
     ctx.set_fonts(fonts);
+}
+
+/// Puts a custom family first in the egui family of each weight, ahead of
+/// the face that still draws what the family lacks.
+fn add_custom(
+    fonts: &mut egui::FontDefinitions,
+    prefix: &str,
+    custom: &custom_font::Family,
+    family: impl Fn(fastframe_fonts::Weight) -> egui::FontFamily,
+) {
+    for weight in fastframe_fonts::Weight::ALL {
+        let name = format!("{prefix}-{}", weight.name());
+        fonts
+            .font_data
+            .insert(name.clone(), std::sync::Arc::new(custom.font_data(weight)));
+        fonts
+            .families
+            .entry(family(weight))
+            .or_default()
+            .insert(0, name);
+    }
+}
+
+/// Registers the chat families: the interface's when the chat follows it,
+/// else the chat's face (from a second setup when the interface draws in
+/// another), any custom family in front, and the interface's fallbacks
+/// behind.
+fn add_chat(
+    fonts: &mut egui::FontDefinitions,
+    chosen: &ChosenFonts,
+    interface: fastframe_fonts::Primary,
+    behind: &[(fastframe_fonts::Weight, Vec<String>)],
+) {
+    let Some(chat) = &chosen.chat else {
+        for (weight, _) in behind {
+            let family = fonts
+                .families
+                .get(&weight.family())
+                .cloned()
+                .unwrap_or_default();
+            fonts.families.insert(chat_family(*weight), family);
+        }
+        return;
+    };
+    let primary = primary_font_for(&chat.choice);
+    let other = (primary != interface).then(|| {
+        fastframe_fonts::FontSetup::default()
+            .primary(primary)
+            .system_fallbacks(false)
+            .definitions()
+    });
+    if let Some(custom) = &chat.custom {
+        add_custom(fonts, "zapfast-chat-custom", custom, chat_family);
+    }
+    for (weight, behind) in behind {
+        let mut family = fonts
+            .families
+            .remove(&chat_family(*weight))
+            .unwrap_or_default();
+        match &other {
+            Some(other) => {
+                if let Some(data) = other.font_data.get(weight.name()) {
+                    let name = format!("zapfast-chat-{}", weight.name());
+                    fonts
+                        .font_data
+                        .insert(name.clone(), std::sync::Arc::clone(data));
+                    family.push(name);
+                }
+            }
+            None => family.push(weight.name().to_owned()),
+        }
+        family.extend(behind.iter().cloned());
+        fonts.families.insert(chat_family(*weight), family);
+    }
 }
 
 /// Registers Inter at each weight as the [`tabular`] families, each falling
