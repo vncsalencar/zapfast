@@ -488,29 +488,68 @@ pub fn apply(ctx: &egui::Context, palette: &Palette) {
     ctx.set_global_style(style);
 }
 
-/// Whether the interface is drawn in the bundled Inter instead of the
-/// platform's font (Settings, Appearance, Font).
-static INTER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The interface's typeface (Settings, Appearance, Font), with a custom
+/// file's bytes once they have been read and checked.
+struct ChosenFont {
+    choice: crate::settings::FontChoice,
+    file: Option<std::sync::Arc<Vec<u8>>>,
+}
+
+static FONT: std::sync::Mutex<ChosenFont> = std::sync::Mutex::new(ChosenFont {
+    choice: crate::settings::FontChoice::System,
+    file: None,
+});
+
+fn chosen_font() -> std::sync::MutexGuard<'static, ChosenFont> {
+    FONT.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Chooses the interface's typeface and installs it. Call it before
 /// [`install`] with the saved choice, and again when the choice changes.
-pub fn set_font(ctx: &egui::Context, font: crate::settings::FontChoice) {
-    let inter = font == crate::settings::FontChoice::Inter;
-    if INTER.swap(inter, std::sync::atomic::Ordering::AcqRel) != inter {
-        install_fonts(ctx);
+/// A custom file that cannot be read or is not a font is refused, and the
+/// typeface stays as it was.
+pub fn set_font(ctx: &egui::Context, font: &crate::settings::FontChoice) -> Result<(), String> {
+    if chosen_font().choice == *font {
+        return Ok(());
     }
+    let file = match font {
+        crate::settings::FontChoice::Custom(path) => Some(read_font(path)?),
+        _ => None,
+    };
+    *chosen_font() = ChosenFont {
+        choice: font.clone(),
+        file: file.clone(),
+    };
+    // Installs what was just chosen, not what the global holds by now.
+    install_chosen_fonts(
+        ctx,
+        primary_font_for(font),
+        file.as_deref().map(Vec::as_slice),
+    );
+    Ok(())
+}
+
+/// Reads a font file and checks that egui can parse it: egui panics on a
+/// face it cannot read, so nothing unchecked may reach it.
+fn read_font(path: &std::path::Path) -> Result<std::sync::Arc<Vec<u8>>, String> {
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    skrifa::FontRef::from_index(&bytes, 0).map_err(|error| error.to_string())?;
+    Ok(std::sync::Arc::new(bytes))
 }
 
 /// Whether Inter is the chosen typeface.
 #[cfg(test)]
 pub fn inter_chosen() -> bool {
-    INTER.load(std::sync::atomic::Ordering::Acquire)
+    chosen_font().choice == crate::settings::FontChoice::Inter
 }
 
 /// The typeface the interface is asked to draw with: the setting's, and
-/// always Inter in tests, so layouts do not depend on the machine.
-fn primary_font() -> fastframe_fonts::Primary {
-    if cfg!(test) || INTER.load(std::sync::atomic::Ordering::Acquire) {
+/// always Inter in tests, so layouts do not depend on the machine. A custom
+/// file draws in front of the platform's font, which still covers what the
+/// file lacks.
+fn primary_font_for(font: &crate::settings::FontChoice) -> fastframe_fonts::Primary {
+    if cfg!(test) || *font == crate::settings::FontChoice::Inter {
         fastframe_fonts::Primary::Inter
     } else {
         fastframe_fonts::Primary::System
@@ -522,13 +561,56 @@ fn primary_font() -> fastframe_fonts::Primary {
 /// for the scripts it lacks, hinted as the desktop asks. Inter also draws
 /// the [`tabular`] timers.
 fn install_fonts(ctx: &egui::Context) {
-    let primary = primary_font();
+    let (primary, file) = {
+        let chosen = chosen_font();
+        (primary_font_for(&chosen.choice), chosen.file.clone())
+    };
+    install_chosen_fonts(ctx, primary, file.as_deref().map(Vec::as_slice));
+}
+
+fn install_chosen_fonts(
+    ctx: &egui::Context,
+    primary: fastframe_fonts::Primary,
+    file: Option<&[u8]>,
+) {
     let mut fonts = fastframe_fonts::FontSetup::default()
         .primary(primary)
         .definitions();
+    if let Some(file) = file {
+        add_custom(&mut fonts, file);
+    }
     add_tabular(&mut fonts);
     text_rendering().apply_to(&mut fonts);
     ctx.set_fonts(fonts);
+}
+
+/// Puts a custom font file first in the family of each weight. A variable
+/// font is set to each weight on its `wght` axis; a static one draws every
+/// weight the same.
+fn add_custom(fonts: &mut egui::FontDefinitions, file: &[u8]) {
+    use fastframe_fonts::Weight;
+    use skrifa::MetadataProvider;
+    let variable = skrifa::FontRef::from_index(file, 0).is_ok_and(|font| {
+        font.axes()
+            .iter()
+            .any(|axis| axis.tag() == skrifa::Tag::new(b"wght"))
+    });
+    for weight in Weight::ALL {
+        let name = format!("zapfast-custom-{}", weight.name());
+        let mut data = egui::FontData::from_owned(file.to_vec());
+        if variable {
+            data.tweak.coords =
+                egui::epaint::text::VariationCoords::new([(b"wght", weight.value())]);
+        }
+        fonts
+            .font_data
+            .insert(name.clone(), std::sync::Arc::new(data));
+        fonts
+            .families
+            .entry(weight.family())
+            .or_default()
+            .insert(0, name);
+    }
 }
 
 /// Registers Inter at each weight as the [`tabular`] families, each falling
