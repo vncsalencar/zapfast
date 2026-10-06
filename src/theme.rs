@@ -5,6 +5,8 @@
 
 use egui::{Color32, CornerRadius, Response, Sense, Stroke, Vec2};
 
+mod custom_font;
+
 /// A local JSON palette, known by its filename in the themes directory.
 pub type CustomTheme = fastframe_theme::CustomTheme<Palette>;
 
@@ -489,15 +491,15 @@ pub fn apply(ctx: &egui::Context, palette: &Palette) {
 }
 
 /// The interface's typeface (Settings, Appearance, Font), with a custom
-/// file's bytes once they have been read and checked.
+/// family once its files have been read and checked.
 struct ChosenFont {
     choice: crate::settings::FontChoice,
-    file: Option<std::sync::Arc<Vec<u8>>>,
+    custom: Option<std::sync::Arc<custom_font::Family>>,
 }
 
 static FONT: std::sync::Mutex<ChosenFont> = std::sync::Mutex::new(ChosenFont {
     choice: crate::settings::FontChoice::System,
-    file: None,
+    custom: None,
 });
 
 fn chosen_font() -> std::sync::MutexGuard<'static, ChosenFont> {
@@ -513,29 +515,38 @@ pub fn set_font(ctx: &egui::Context, font: &crate::settings::FontChoice) -> Resu
     if chosen_font().choice == *font {
         return Ok(());
     }
-    let file = match font {
-        crate::settings::FontChoice::Custom(path) => Some(read_font(path)?),
+    let custom = match font {
+        crate::settings::FontChoice::Custom(path) => {
+            Some(std::sync::Arc::new(custom_font::Family::load(path)?))
+        }
         _ => None,
     };
     *chosen_font() = ChosenFont {
         choice: font.clone(),
-        file: file.clone(),
+        custom: custom.clone(),
     };
     // Installs what was just chosen, not what the global holds by now.
-    install_chosen_fonts(
-        ctx,
-        primary_font_for(font),
-        file.as_deref().map(Vec::as_slice),
-    );
+    install_chosen_fonts(ctx, primary_font_for(font), custom.as_deref());
     Ok(())
 }
 
-/// Reads a font file and checks that egui can parse it: egui panics on a
-/// face it cannot read, so nothing unchecked may reach it.
-fn read_font(path: &std::path::Path) -> Result<std::sync::Arc<Vec<u8>>, String> {
-    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-    skrifa::FontRef::from_index(&bytes, 0).map_err(|error| error.to_string())?;
-    Ok(std::sync::Arc::new(bytes))
+/// What Settings says about the custom family on screen.
+pub struct CustomFontSummary {
+    /// The family's name, shown in place of the file's.
+    pub family: String,
+    /// Whether every weight draws the same, so bold text looks regular.
+    pub single_weight: bool,
+}
+
+/// The custom family the interface draws with, if one is installed.
+pub fn custom_font() -> Option<CustomFontSummary> {
+    chosen_font()
+        .custom
+        .as_ref()
+        .map(|family| CustomFontSummary {
+            family: family.name.clone(),
+            single_weight: family.single_weight(),
+        })
 }
 
 /// Whether Inter is the chosen typeface.
@@ -561,56 +572,27 @@ fn primary_font_for(font: &crate::settings::FontChoice) -> fastframe_fonts::Prim
 /// for the scripts it lacks, hinted as the desktop asks. Inter also draws
 /// the [`tabular`] timers.
 fn install_fonts(ctx: &egui::Context) {
-    let (primary, file) = {
+    let (primary, custom) = {
         let chosen = chosen_font();
-        (primary_font_for(&chosen.choice), chosen.file.clone())
+        (primary_font_for(&chosen.choice), chosen.custom.clone())
     };
-    install_chosen_fonts(ctx, primary, file.as_deref().map(Vec::as_slice));
+    install_chosen_fonts(ctx, primary, custom.as_deref());
 }
 
 fn install_chosen_fonts(
     ctx: &egui::Context,
     primary: fastframe_fonts::Primary,
-    file: Option<&[u8]>,
+    custom: Option<&custom_font::Family>,
 ) {
     let mut fonts = fastframe_fonts::FontSetup::default()
         .primary(primary)
         .definitions();
-    if let Some(file) = file {
-        add_custom(&mut fonts, file);
+    if let Some(custom) = custom {
+        custom.add_to(&mut fonts);
     }
     add_tabular(&mut fonts);
     text_rendering().apply_to(&mut fonts);
     ctx.set_fonts(fonts);
-}
-
-/// Puts a custom font file first in the family of each weight. A variable
-/// font is set to each weight on its `wght` axis; a static one draws every
-/// weight the same.
-fn add_custom(fonts: &mut egui::FontDefinitions, file: &[u8]) {
-    use fastframe_fonts::Weight;
-    use skrifa::MetadataProvider;
-    let variable = skrifa::FontRef::from_index(file, 0).is_ok_and(|font| {
-        font.axes()
-            .iter()
-            .any(|axis| axis.tag() == skrifa::Tag::new(b"wght"))
-    });
-    for weight in Weight::ALL {
-        let name = format!("zapfast-custom-{}", weight.name());
-        let mut data = egui::FontData::from_owned(file.to_vec());
-        if variable {
-            data.tweak.coords =
-                egui::epaint::text::VariationCoords::new([(b"wght", weight.value())]);
-        }
-        fonts
-            .font_data
-            .insert(name.clone(), std::sync::Arc::new(data));
-        fonts
-            .families
-            .entry(weight.family())
-            .or_default()
-            .insert(0, name);
-    }
 }
 
 /// Registers Inter at each weight as the [`tabular`] families, each falling
