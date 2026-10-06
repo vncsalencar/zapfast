@@ -5250,6 +5250,10 @@ impl App {
                 });
             }
             Action::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
+            Action::SetFilterChipOrder(order) => {
+                self.settings.set_filter_chip_order(&order);
+                self.mark_settings_dirty();
+            }
             Action::SetChatFilter(filter) => {
                 if self.locked_folder {
                     self.close_locked_folder();

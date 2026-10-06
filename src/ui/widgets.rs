@@ -869,6 +869,84 @@ pub fn fade_right(ui: &Ui, rect: Rect, width: f32, color: Color32) {
     ui.painter().add(egui::Shape::mesh(mesh));
 }
 
+/// Fades the leftmost `width` points of `rect` into `color`, over content
+/// scrolled past the edge. One gradient quad.
+pub fn fade_left(ui: &Ui, rect: Rect, width: f32, color: Color32) {
+    let fade = Rect::from_min_max(rect.min, pos2(rect.left() + width, rect.bottom()));
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(fade.left_top(), color);
+    mesh.colored_vertex(fade.right_top(), Color32::TRANSPARENT);
+    mesh.colored_vertex(fade.right_bottom(), Color32::TRANSPARENT);
+    mesh.colored_vertex(fade.left_bottom(), color);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    ui.painter().add(egui::Shape::mesh(mesh));
+}
+
+/// The strip under a row of chips where its scroll bar appears. It is the
+/// gap that already lies under the row, so the bar never covers a chip and
+/// takes no room of its own.
+pub const CHIP_BAR_ROOM: f32 = 8.0;
+
+/// A horizontal row of chips that scrolls when it overflows: a plain mouse
+/// wheel scrolls it sideways, since most mice have no sideways wheel, and a
+/// thin floating bar shows in the [`CHIP_BAR_ROOM`] strip under the chips
+/// only while the pointer is over the row. Both edges fade into `fade` while
+/// chips lie past them. The strip belongs to the row, so callers leave no
+/// gap of their own under it.
+pub fn chip_scroll_row<R>(
+    ui: &mut Ui,
+    id_salt: &str,
+    fade: Color32,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> egui::scroll_area::ScrollAreaOutput<R> {
+    let output = ui
+        .scope(|ui| {
+            let style = ui.style_mut();
+            style.always_scroll_the_only_direction = true;
+            // At its widest the bar and its margin fit inside the strip.
+            style.spacing.scroll = egui::style::ScrollStyle {
+                bar_width: 5.0,
+                floating_width: 3.0,
+                bar_outer_margin: 1.5,
+                ..style.spacing.scroll
+            };
+            egui::ScrollArea::horizontal()
+                .id_salt(id_salt)
+                .animated(false)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    let inner = add_contents(ui);
+                    ui.add_space(CHIP_BAR_ROOM);
+                    inner
+                })
+        })
+        .inner;
+    // egui reports the height the row was offered, not the height it took,
+    // which reaches down over whatever follows.
+    let mut output = output;
+    output.inner_rect.max.y =
+        output.inner_rect.min.y + output.content_size.y.min(output.inner_rect.height());
+    let chips = Rect::from_min_max(
+        output.inner_rect.min,
+        pos2(
+            output.inner_rect.right(),
+            output.inner_rect.bottom() - CHIP_BAR_ROOM,
+        ),
+    );
+    if output.state.offset.x > 0.5 {
+        fade_left(ui, chips, CHIP_FADE, fade);
+    }
+    let hidden = output.content_size.x - output.state.offset.x - output.inner_rect.width();
+    if hidden > 0.5 {
+        fade_right(ui, chips, CHIP_FADE, fade);
+    }
+    output
+}
+
+/// Width of the fade over a chip row's edges.
+pub const CHIP_FADE: f32 = 16.0;
+
 /// How far the shadow of a bar or panel reaches over the content beside it.
 const SHADOW_REACH: f32 = 9.0;
 
@@ -1084,11 +1162,39 @@ pub fn filter_chip(
     dotted_chip(ui, palette, None, label, count, selected)
 }
 
+/// A filter chip that can be dragged as well as clicked. Its `id` must not
+/// depend on its place in the row, or egui would lose the drag as the chip
+/// moves.
+pub fn draggable_filter_chip(
+    ui: &mut Ui,
+    palette: &Palette,
+    id: egui::Id,
+    label: &str,
+    count: usize,
+    selected: bool,
+) -> egui::Response {
+    filter_pill(ui, palette, Some(id), None, label, count, selected)
+}
+
 /// A filter chip led by a coloured dot, for filters the user named and
 /// coloured, such as labels.
 pub fn dotted_chip(
     ui: &mut Ui,
     palette: &Palette,
+    dot: Option<Color32>,
+    label: &str,
+    count: usize,
+    selected: bool,
+) -> egui::Response {
+    filter_pill(ui, palette, None, dot, label, count, selected)
+}
+
+/// A chip, clicked only under the id of its place in the row, or clicked
+/// and dragged under a stable `id`.
+fn filter_pill(
+    ui: &mut Ui,
+    palette: &Palette,
+    id: Option<egui::Id>,
     dot: Option<Color32>,
     label: &str,
     count: usize,
@@ -1107,7 +1213,14 @@ pub fn dotted_chip(
     let dot_width = if dot.is_some() { 8.0 + gap } else { 0.0 };
     let width =
         dot_width + text.size().x + number.as_ref().map_or(0.0, |number| gap + number.size().x);
-    let (rect, response) = ui.allocate_exact_size(vec2(width + 18.0, 28.0), Sense::click());
+    let size = vec2(width + 18.0, 28.0);
+    let (rect, response) = match id {
+        Some(id) => {
+            let (_, rect) = ui.allocate_space(size);
+            (rect, ui.interact(rect, id, Sense::click_and_drag()))
+        }
+        None => ui.allocate_exact_size(size, Sense::click()),
+    };
     theme::reveal_focus(&response);
     theme::focus_outline(ui, response.id, rect, rect.height() / 2.0);
     if ui.is_rect_visible(rect) {

@@ -1604,6 +1604,9 @@ pub enum Action {
     CloseDialog,
     ToggleSidebar,
     SetChatFilter(ChatFilter),
+    /// Saves the filter chips' order, once a chip dragged to a new place is
+    /// let go.
+    SetFilterChipOrder(Vec<crate::settings::FilterChip>),
     /// Picks the label the chat list shows; `None` shows every chat.
     SelectLabel(Option<String>),
     /// Replaces the labels worn by one chat.

@@ -98,24 +98,14 @@ pub fn chip_row(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     if app.labels.is_empty() {
         return;
     }
-    ui.add_space(2.0);
-    let row = egui::ScrollArea::horizontal()
-        .id_salt("label-chips")
-        // A floating bar would cover the chips; the edge fade shows the row scrolls.
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-        .animated(false)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = vec2(4.0, 6.0);
-                label_chips(app, ui, palette);
-                ui.add_space(4.0);
-            });
+    // The gap above is the filter row's scroll-bar strip.
+    let row = widgets::chip_scroll_row(ui, "label-chips", palette.panel, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 6.0);
+            label_chips(app, ui, palette);
+            ui.add_space(4.0);
         });
-    let hidden = row.content_size.x - row.state.offset.x - row.inner_rect.width();
-    if hidden > 0.5 {
-        widgets::fade_right(ui, row.inner_rect, super::chats::CHIP_FADE, palette.panel);
-    }
+    });
     ui.ctx()
         .data_mut(|data| data.insert_temp(chip_row_id(), row.inner_rect));
 }

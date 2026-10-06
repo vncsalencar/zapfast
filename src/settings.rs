@@ -61,6 +61,81 @@ pub enum FontChoice {
     Custom(std::path::PathBuf),
 }
 
+/// A chip in the chat list's filter row. Settings keeps their order by
+/// name, so a chip a later or earlier version lacks cannot spoil the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilterChip {
+    All,
+    Unread,
+    Private,
+    Favorites,
+    Groups,
+    Channels,
+    Archived,
+    Locked,
+}
+
+impl FilterChip {
+    /// The row's order until the reader drags a chip elsewhere.
+    pub const DEFAULT_ORDER: [Self; 8] = [
+        Self::All,
+        Self::Unread,
+        Self::Private,
+        Self::Favorites,
+        Self::Groups,
+        Self::Channels,
+        Self::Archived,
+        Self::Locked,
+    ];
+
+    /// The name the order is saved under.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Unread => "unread",
+            Self::Private => "private",
+            Self::Favorites => "favorites",
+            Self::Groups => "groups",
+            Self::Channels => "channels",
+            Self::Archived => "archived",
+            Self::Locked => "locked",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        Self::DEFAULT_ORDER
+            .into_iter()
+            .find(|chip| chip.name() == name)
+    }
+}
+
+impl Settings {
+    /// The filter row's order: the saved one, without names this version
+    /// does not know or repeats, then any chip it lacks in default order.
+    pub fn filter_chip_order(&self) -> Vec<FilterChip> {
+        let mut order: Vec<FilterChip> = Vec::with_capacity(FilterChip::DEFAULT_ORDER.len());
+        let saved = self
+            .filter_chip_order
+            .iter()
+            .filter_map(|name| FilterChip::from_name(name));
+        for chip in saved.chain(FilterChip::DEFAULT_ORDER) {
+            if !order.contains(&chip) {
+                order.push(chip);
+            }
+        }
+        order
+    }
+
+    /// Saves the filter row's order; the default order is saved as none.
+    pub fn set_filter_chip_order(&mut self, order: &[FilterChip]) {
+        self.filter_chip_order = if order == FilterChip::DEFAULT_ORDER {
+            Vec::new()
+        } else {
+            order.iter().map(|chip| chip.name().to_owned()).collect()
+        };
+    }
+}
+
 /// A custom font used before: the file it was chosen by, and its family's
 /// name, so a picker can offer it without reading it again.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,6 +487,9 @@ pub struct Settings {
     /// Whether the chat list's message previews draw in the chat's font.
     /// Names and labels around them keep the interface's.
     pub chat_font_in_previews: bool,
+    /// The chat list's filter chips in the order the reader dragged them
+    /// into, by [`FilterChip::name`]. Empty keeps the default order.
+    pub filter_chip_order: Vec<String>,
     /// Custom fonts used before, newest first, so the font pickers keep
     /// offering them after another font is chosen.
     pub recent_fonts: Vec<RecentFont>,
@@ -541,6 +619,7 @@ impl Default for Settings {
             font: FontChoice::System,
             chat_font: None,
             chat_font_in_previews: false,
+            filter_chip_order: Vec::new(),
             recent_fonts: Vec::new(),
             interface_language: None,
             custom_theme: None,
@@ -939,6 +1018,35 @@ mod tests {
         assert_eq!(older.chat_font, None);
         let chat: Settings = serde_json::from_str(r#"{"chat_font":"inter"}"#).unwrap();
         assert_eq!(chat.chat_font, Some(FontChoice::Inter));
+    }
+
+    /// The filter row keeps the reader's order, drops names it does not
+    /// know or repeats, and places chips missing from it last.
+    #[test]
+    fn filter_chip_order_survives_unknown_and_missing_chips() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.filter_chip_order(), FilterChip::DEFAULT_ORDER);
+        let parsed: Settings = serde_json::from_str(
+            r#"{"filter_chip_order":["archived","someday","unread","archived","all"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.filter_chip_order(),
+            [
+                FilterChip::Archived,
+                FilterChip::Unread,
+                FilterChip::All,
+                FilterChip::Private,
+                FilterChip::Favorites,
+                FilterChip::Groups,
+                FilterChip::Channels,
+                FilterChip::Locked,
+            ]
+        );
+        settings.set_filter_chip_order(&parsed.filter_chip_order());
+        assert_eq!(settings.filter_chip_order(), parsed.filter_chip_order());
+        settings.set_filter_chip_order(&FilterChip::DEFAULT_ORDER);
+        assert!(settings.filter_chip_order.is_empty());
     }
 
     /// The pickers remember the newest custom fonts, each once.
