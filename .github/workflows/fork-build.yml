@@ -1,0 +1,137 @@
+name: Fork build
+
+# Test copies of whatever commit is chosen, built on demand from the Actions
+# tab. The steps follow release.yml, minus everything that makes a release:
+# no tag or version checks, no installer, no signing beyond the ad-hoc
+# signature macOS needs to open an app, no notarization, no attestation, and
+# no GitHub Release. The packages leave out packaging/zapfast-portable.txt,
+# so the copies never replace themselves with an upstream release.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # As in release.yml; without the secret the GIF picker asks for a key.
+  ZAPFAST_GIPHY_KEY: ${{ secrets.ZAPFAST_GIPHY_KEY || secrets.FASTSAPP_GIPHY_KEY }}
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # The repository pins its toolchain; add the target's standard library
+      # to the toolchain the pin actually resolves to.
+      - run: rustup target add ${{ matrix.target }}
+      - name: GUI build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev cmake perl
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Name the build
+        id: name
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          echo "name=zapfast-${version}-${GITHUB_SHA::7}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+
+      - name: Package
+        shell: bash
+        env:
+          NAME: ${{ steps.name.outputs.name }}
+        run: |
+          mkdir -p "dist/$NAME"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/zapfast.exe" "dist/$NAME/"
+          else
+            cp "target/${{ matrix.target }}/release/zapfast" "dist/$NAME/"
+          fi
+          # No packaging/zapfast-portable.txt: it would let the copy update
+          # itself to an upstream release.
+          cp README.md LICENSE THIRD-PARTY-NOTICES.md "dist/$NAME/"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            cp --parents packaging/applications/zapfast.desktop packaging/icons/zapfast.svg contrib/omarchy/zapfast.json.tpl contrib/omarchy/zapfast-theme "dist/$NAME/"
+          fi
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "$NAME.zip" "$NAME"
+          else
+            tar czf "$NAME.tar.gz" "$NAME"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.name.outputs.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Build both architectures
+        run: |
+          cargo build --locked --release --target aarch64-apple-darwin
+          cargo build --locked --release --target x86_64-apple-darwin
+
+      - name: Universal binary
+        run: |
+          mkdir -p universal
+          lipo -create \
+            target/aarch64-apple-darwin/release/zapfast \
+            target/x86_64-apple-darwin/release/zapfast \
+            -output universal/zapfast
+          # The two release builds fill most of the runner's disk.
+          rm -rf target
+
+      - name: Name the build
+        id: name
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=zapfast-${version}-${GITHUB_SHA::7}-macos-universal" >> "$GITHUB_OUTPUT"
+
+      # Without CODESIGN_IDENTITY, bundle.sh signs ad hoc, which Apple
+      # silicon needs to open the app at all; there is no Developer ID
+      # signature or notarization.
+      - name: App bundle
+        env:
+          NAME: ${{ steps.name.outputs.name }}
+          VERSION: ${{ steps.name.outputs.version }}
+        run: |
+          mkdir -p "dist/$NAME"
+          bash packaging/macos/bundle.sh universal/zapfast "dist/$NAME/ZapFast.app" "$VERSION"
+          cp README.md LICENSE THIRD-PARTY-NOTICES.md "dist/$NAME/"
+          # ditto keeps the bundle's permissions and signature intact.
+          cd dist
+          ditto -c -k --keepParent "$NAME" "$NAME.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.name.outputs.name }}
+          path: dist/*.zip
+          if-no-files-found: error
