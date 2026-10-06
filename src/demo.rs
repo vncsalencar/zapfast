@@ -8495,33 +8495,6 @@ mod tests {
     }
 
     #[test]
-    fn a_paste_is_seen_on_the_key_release() {
-        // Platforms may deliver only the Ctrl+V key release for image paste.
-        let mut app = app();
-        let ctx = egui::Context::default();
-        app.attach(&ctx);
-        render(&mut app, &ctx);
-        let release = egui::Event::Key {
-            key: egui::Key::V,
-            physical_key: None,
-            pressed: false,
-            repeat: false,
-            modifiers: egui::Modifiers::COMMAND,
-        };
-        frame_with(&mut app, &ctx, vec![release]);
-        assert!(ctx.input(crate::app::wants_paste));
-        let plain = egui::Event::Key {
-            key: egui::Key::V,
-            physical_key: None,
-            pressed: false,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        };
-        frame_with(&mut app, &ctx, vec![plain]);
-        assert!(!ctx.input(crate::app::wants_paste), "a plain V is typing");
-    }
-
-    #[test]
     fn a_pasted_picture_waits_for_its_caption() {
         let mut app = app();
         let ctx = egui::Context::default();

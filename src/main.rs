@@ -116,11 +116,16 @@ enum Control {
 /// data-control protocol (GNOME, mutter) and it falls back to X11, which works
 /// there. Quiet that one target so it does not fill the log file, without
 /// hiding real clipboard failures (`arboard=error`) or any other warning.
+///
+/// `egui_winit::clipboard` logs an error on every paste shortcut whose
+/// clipboard holds no text, as with a screenshot: egui-winit asks only for
+/// text, and ZapFast reads pictures and files itself, logging its own
+/// failures.
 fn default_log_filter(verbose: bool) -> &'static str {
     if verbose {
         "info,zapfast=debug,whatsapp_rust=debug,wacore=debug"
     } else {
-        "warn,zapfast=info,fastframe_fonts=info,arboard=error"
+        "warn,zapfast=info,fastframe_fonts=info,arboard=error,egui_winit::clipboard=off"
     }
 }
 
@@ -767,6 +772,17 @@ mod log_filter_tests {
             log::Level::Warn,
             "zapfast::backend::worker"
         ));
+    }
+
+    /// Pasting a picture makes egui-winit log that the clipboard holds no
+    /// text, on every paste. The default log drops that target only; ZapFast's
+    /// own clipboard failures and other egui-winit messages stay.
+    #[test]
+    fn the_default_log_drops_egui_winits_text_paste_error() {
+        let filter = default_log_filter(false);
+        assert!(!matches(filter, log::Level::Error, "egui_winit::clipboard"));
+        assert!(matches(filter, log::Level::Warn, "egui_winit"));
+        assert!(matches(filter, log::Level::Error, "zapfast::app"));
     }
 
     /// Every log names the face chosen for each fallback script, without
