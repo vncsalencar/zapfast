@@ -407,8 +407,11 @@ pub fn set_density(ctx: &egui::Context, density: f32) {
 /// egui's spacing at `density` times the default.
 fn spacing_at(spacing: &mut egui::style::Spacing, density: f32) {
     let margin = |points: f32| egui::Margin::same(scaled(points, density) as i8);
-    spacing.item_spacing = Vec2::new(8.0, 6.0) * density;
-    spacing.button_padding = Vec2::new(12.0, 6.0) * density;
+    // Whole points, like the margins: a fractional gap leaves everything
+    // after it between pixels, blurred, and egui flags it in debug builds.
+    let size = |x: f32, y: f32| Vec2::new(scaled(x, density), scaled(y, density));
+    spacing.item_spacing = size(8.0, 6.0);
+    spacing.button_padding = size(12.0, 6.0);
     spacing.menu_margin = margin(6.0);
     spacing.window_margin = margin(16.0);
 }
@@ -1575,12 +1578,28 @@ mod tests {
         assert_eq!(normal.menu_margin, egui::Margin::same(6));
         set_density(&ctx, 1.4);
         let spacious = spacing(&ctx);
-        assert_eq!(spacious.item_spacing, Vec2::new(8.0, 6.0) * 1.4);
+        assert_eq!(spacious.item_spacing, Vec2::new(11.0, 8.0));
+        assert_eq!(spacious.button_padding, Vec2::new(17.0, 8.0));
         assert_eq!(spacious.window_margin, egui::Margin::same(22));
         apply(&ctx, &Palette::light(), 0.7);
         let compact = spacing(&ctx);
         assert_eq!(compact.window_margin, egui::Margin::same(11));
         assert_eq!(compact.menu_margin, egui::Margin::same(4));
+        // At every step of the slider the spacing stays on whole points, so
+        // nothing after it lands between pixels (egui's "Unaligned").
+        for step in 0..=14 {
+            let density = 0.7 + step as f32 * 0.05;
+            let mut spacing = egui::style::Spacing::default();
+            spacing_at(&mut spacing, density);
+            for value in [
+                spacing.item_spacing.x,
+                spacing.item_spacing.y,
+                spacing.button_padding.x,
+                spacing.button_padding.y,
+            ] {
+                assert_eq!(value.fract(), 0.0, "{value} at {density}");
+            }
+        }
         // The interaction size is not spacing, so it stays.
         assert_eq!(compact.interact_size, normal.interact_size);
         assert_eq!(row_height(1.0), ROW_HEIGHT);

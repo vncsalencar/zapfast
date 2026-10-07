@@ -1149,20 +1149,32 @@ fn spacing_slider(
 ) -> Option<f32> {
     let palette = app.palette;
     let mut changed = None;
-    // Right to left: Reset, the value, then the slider before them.
-    if (value - 1.0).abs() > f32::EPSILON
-        && theme::soft_button(
-            ui,
-            &palette,
-            None,
-            &crate::i18n::gettext(app.locale, "Reset"),
-            false,
-        )
-        .clicked()
-    {
+    // Right to left: Reset, the value, then the slider before them. Reset
+    // keeps its room while hidden and the value has a fixed slot, so every
+    // spacing slider sits at the same place whatever it shows.
+    let away = (value - 1.0).abs() > f32::EPSILON;
+    let reset = ui
+        .scope(|ui| {
+            if !away {
+                ui.set_invisible();
+            }
+            theme::soft_button(
+                ui,
+                &palette,
+                None,
+                &crate::i18n::gettext(app.locale, "Reset"),
+                false,
+            )
+        })
+        .inner;
+    if away && reset.clicked() {
         changed = Some(1.0);
     }
-    theme::text(ui, label(value), theme::medium(13.5), palette.text);
+    ui.allocate_ui_with_layout(
+        egui::vec2(52.0, ui.spacing().interact_size.y),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| theme::text(ui, label(value), theme::medium(13.5), palette.text),
+    );
     let mut moved = value;
     ui.spacing_mut().slider_width = 140.0_f32.min(ui.available_width());
     let response = ui.add(
