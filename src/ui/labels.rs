@@ -99,7 +99,7 @@ pub fn chip_row(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         return;
     }
     // The gap above is the filter row's scroll-bar strip.
-    let row = widgets::chip_scroll_row(ui, "label-chips", palette.panel, |ui| {
+    let row = widgets::chip_scroll_row(ui, "label-chips", super::chats::chip_fade(palette), |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 6.0);
             label_chips(app, ui, palette);
