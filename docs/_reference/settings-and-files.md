@@ -21,12 +21,16 @@ On Linux:
 | Wallpaper image | `~/.local/state/zapfast/accounts/<id>/wallpaper.jpg` | Copy of the chosen picture (or `.png`, `.webp`, `.gif`) |
 | Attachments, avatars | `~/.cache/zapfast/accounts/<id>/` | Safe to delete; available files download again when viewed |
 | Last run's log | `~/.local/state/zapfast/zapfast.log` | `--verbose` for more |
+| The run before's log | `~/.local/state/zapfast/zapfast.previous.log` | Kept for one more start |
 | Crash log | `~/.local/state/zapfast/panic.log` | Safe to delete |
 
 Back up the archive if you need its history. WhatsApp sends only recent
 history to a new device, although ZapFast can request some older messages from
 the phone. Clearing the media cache makes ZapFast download attachments again.
 Expired attachments may still be available through the phone.
+A download is reported as complete only after its local path is recorded in
+the archive. If that write fails, the attachment shows a failure instead;
+the downloaded file is kept in its destination.
 **Settings > Files > Storage used** shows how much space the account on screen
 has in its media cache, split into images, videos and GIFs, stickers, and other
 files. **Clear…** there deletes that account's cached attachments after asking:
@@ -149,12 +153,20 @@ name or description, in the interface language or in English.
   active ones (never channels). It sends at most one request every twenty
   seconds, and only while no other history request is waiting. Each chat is
   asked for at most five pages each time ZapFast runs, and a chat the phone
-  does not answer goes to the back of the queue. Pages fetched this way go into
-  the archive without moving the view. A chat the phone says has nothing older
-  is not asked again.
-- **Keep chats archived** (development builds): on by default. When off, a new
-  message, received or sent, brings an archived chat back to the list. Applies
-  to all accounts here; it does not read or change the phone's own setting.
+  does not answer goes to the back of the queue. Unanswered requests back off
+  for that chat only; other chats keep the normal twenty-second gap. After
+  three unanswered requests in a row, that chat's background recovery pauses
+  until one of those requests gets a late reply, or ZapFast reconnects or
+  restarts. This does not mark history complete or prevent manual requests.
+  A matched background reply resets that chat's timeout count, even if late.
+  Requests that cannot be sent still back off the whole account. Pages fetched
+  this way go into the archive without moving the view. A chat the phone says
+  has nothing older is not asked again.
+- **Keep chats archived**: on by default. When off, a new message, received or
+  sent, brings an archived chat back to the list. Applies to all accounts here
+  whose phone has not sent its own **Keep chats archived**; once a phone has,
+  ZapFast follows the phone for that account. It does not change the phone's
+  setting.
 - **Pause other media while recording or playing**: pause music and videos in
   other apps while you record, or while a voice message, audio, or video plays
   with sound, and resume them afterwards. Linux and Windows only.
@@ -292,6 +304,37 @@ the new one.
 
 ## The log
 
-Each run replaces `zapfast.log` and records warnings and errors, never
+Each run starts `zapfast.log` afresh and records warnings and errors, never
 message contents, phone numbers, or keys. Include the end of this file when
-reporting an issue. **Settings > Files > Log > Open** shows it.
+reporting an issue. **Settings > Files > Log > Open** shows it. The run before
+is kept beside it as `zapfast.previous.log`: if ZapFast froze and you had to
+restart it, that file holds what happened.
+
+During a call the log also records the call's numbers every few seconds: the
+video rate, loss and keyframes in each direction, and the audio devices'
+health. They are counts and sizes only.
+
+### Saving a call's video for diagnosis
+
+To work on a video call's picture quality, start ZapFast with
+`ZAPFAST_CALL_VIDEO_DUMP` set to a folder. Each video call then writes the
+video it sends and the video it receives there, as raw H.264
+(`<time>-<call>-sent.h264` and `-received.h264`), which `ffmpeg` and media
+players read. Nothing is written without the variable. The files are the
+picture of both people on the call, so only set it for a call whose other side
+agreed, and delete the files when you are done.
+
+### Saving a call's audio for diagnosis
+
+To work on echo cancellation, start ZapFast with `ZAPFAST_CALL_AUDIO_DUMP` set
+to a folder. Each call's microphone stream then writes four files there,
+`<time>-<stream>-reference.wav` (the other side's voice as your speaker played
+it), `-microphone.wav` (your microphone before any processing), `-output.wav`
+(what was sent after echo cancellation, noise suppression and level control),
+all mono 16 kHz, and `-order.csv`, which lets a developer replay the recording
+through the echo canceller exactly as the call ran it
+(`cargo run --release --example aec_replay -- <folder>/<time>-<stream>-reference.wav`,
+with the options listed at the top of `examples/aec_replay.rs`).
+Nothing is written without the variable. The files are both people's voices,
+so only set it for a call whose other side agreed, and delete the files when
+you are done.

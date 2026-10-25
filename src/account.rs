@@ -39,6 +39,9 @@ pub struct Account {
     pub(crate) prefetch_sent: Option<(bool, Option<ChatId>)>,
     pub scroll_chat_into_view: Option<ChatId>,
     pub drafts: HashMap<ChatId, String>,
+    /// Whether the open chat had a draft when opened. Keep its list priority
+    /// stable while the reader types, clears, or sends that draft.
+    pub(crate) open_draft_priority: bool,
     /// This account's media cache as last measured, for Settings. `None`
     /// until a measurement succeeds, so a failed one shows no numbers
     /// rather than zeroes.
@@ -80,6 +83,12 @@ pub struct Account {
     pub(crate) new_contact_sequence: u64,
     pub(crate) new_contact_request: Option<u64>,
     pub(crate) new_contact_dialog_request: Option<u64>,
+    /// The group being put together in the New chat dialog, if any.
+    pub new_group: Option<crate::new_group::Draft>,
+    pub(crate) new_group_sequence: u64,
+    /// The `CreateGroup` the window waits for; an earlier one's answer files
+    /// its group and opens nothing.
+    pub(crate) new_group_request: Option<u64>,
     pub pair_phone: String,
     pub show_archived: bool,
     pub chat_filter: ChatFilter,
@@ -159,6 +168,7 @@ impl Account {
             prefetch_sent: None,
             scroll_chat_into_view: None,
             drafts: HashMap::new(),
+            open_draft_priority: false,
             storage_stats: None,
             storage_token: 0,
             storage_clearing: false,
@@ -194,6 +204,9 @@ impl Account {
             new_contact_sequence: 0,
             new_contact_request: None,
             new_contact_dialog_request: None,
+            new_group: None,
+            new_group_sequence: 0,
+            new_group_request: None,
             pair_phone: String::new(),
             show_archived: false,
             chat_filter,

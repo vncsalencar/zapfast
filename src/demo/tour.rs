@@ -1530,6 +1530,28 @@ mod tests {
             for _ in 0..3 {
                 frame(&mut app, &mut tour, &ctx, Vec::new());
             }
+            // Leave closes the panel's list: scroll to its end, past a
+            // group's members, link and Add members, as a reader would.
+            let over_panel = Pos2::new(1100.0, 400.0);
+            for _ in 0..4 {
+                frame(
+                    &mut app,
+                    &mut tour,
+                    &ctx,
+                    vec![
+                        Event::PointerMoved(over_panel),
+                        Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: vec2(0.0, -2000.0),
+                            modifiers: Modifiers::NONE,
+                            phase: egui::TouchPhase::Move,
+                        },
+                    ],
+                );
+            }
+            for _ in 0..3 {
+                frame(&mut app, &mut tour, &ctx, Vec::new());
+            }
             // The controls are announced in the interface language, which
             // follows the system when Settings carries no choice of its own.
             let locale = app.locale;
@@ -1716,6 +1738,8 @@ mod tests {
     #[test]
     fn the_theme_dropdown_selects_spotifast_palettes_and_returns_to_follow_system() {
         let mut app = super::super::tests::app();
+        // Keep Follow system unique to the open menu while scrolling its choices.
+        app.settings.theme = ThemeChoice::Dark;
         app.page = Page::Settings;
         app.custom_themes =
             crate::theme::Catalog::preview(crate::theme::presets().collect(), false);
